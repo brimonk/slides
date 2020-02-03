@@ -101,6 +101,8 @@ int show_free(struct show_t *show);
 int f_fontload(struct font_t *font, char *path, s32 fontsize);
 /* f_fontfree : frees all resources associated with the font */
 int f_fontfree(struct font_t *font);
+/* f_vertadvance : returns the desired font vertical advance value */
+s32 f_vertadvance(struct font_t *font);
 
 /* slide_render : renders the slide 'idx' into its internal buffer */
 int slide_render(struct show_t *show, s32 idx);
@@ -332,6 +334,7 @@ int slide_render(struct show_t *show, s32 idx)
 	struct fchar_t *fchar;
 	s64 i, j;
 	s32 w_xpos, w_ypos;
+	s32 yadv;
 
 	// NOTE (brian) for every single slide in the slideshow, we have to
 	// draw every character for every line
@@ -345,19 +348,20 @@ int slide_render(struct show_t *show, s32 idx)
 	slide_setbg(slide);
 
 	// get this figure from image dimensions
-	w_xpos = 32;
 	w_ypos = 64;
+	yadv = f_vertadvance(&show->font);
+
 	for (i = 0; i < slide->text_len; i++) {
+		w_xpos = 32;
 		for (j = 0; slide->text[i] && j < strlen(slide->text[i]); j++) {
 			if (slide->text[i][j] != ' ') {
 				fchar = show->font.ftab + slide->text[i][j];
-				printf("%c : ", slide->text[i][j]);
 				slide_renderchar(slide, fchar, w_xpos, w_ypos);
 			}
 
 			w_xpos += fchar->advance;
 		}
-		w_ypos += 32;
+		w_ypos += yadv;
 	}
 
 	return 0;
@@ -368,14 +372,11 @@ int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y)
 {
 	s32 i, j, img_idx, fchar_idx;
 	s32 xpos, ypos;
-	f32 bgscale, fgscale;
 	struct color_t fg, bg;
 	f32 alpha;
 
 	// TODO
 	// 1. Linear Alpha Blending
-
-	printf("%d %d %d %d\n", fchar->f_x, fchar->f_y, fchar->b_x, fchar->b_y);
 
 	memcpy(&fg, &slide->fg, sizeof fg);
 	memcpy(&bg, &slide->bg, sizeof bg);
@@ -389,8 +390,7 @@ int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y)
 			// the image.
 
 			xpos = (i + x) + fchar->b_x;
-			ypos = (j + y) - (fchar->f_y + fchar->b_y);
-			ypos += fchar->b_y;
+			ypos = (j + y) + fchar->b_y;
 
 			img_idx = xpos + ypos * slide->img_w;
 			fchar_idx = i + j * fchar->f_x;
@@ -439,6 +439,20 @@ struct color_t parse_color(char *s)
 	color.b = b;
 
 	return color;
+}
+
+/* f_vertadvance : returns the desired font vertical advance value */
+s32 f_vertadvance(struct font_t *font)
+{
+	s32 i, ret;
+
+	for (i = 0, ret = 0; i < font->ftab_len; i++) {
+		if (ret < font->ftab[i].f_y) {
+			ret = font->ftab[i].f_y;
+		}
+	}
+
+	return ret;
 }
 
 /* f_fontload : load as many ascii characters into the font table as possible */
