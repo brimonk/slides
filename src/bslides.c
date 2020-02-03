@@ -69,7 +69,7 @@ enum {
 };
 
 struct fchar_t {
-	void *bitmap;
+	u8 *bitmap;
 	s32 f_x; // font size (in pixels)
 	s32 f_y;
 	s32 b_x; // bearing information
@@ -102,14 +102,19 @@ int f_fontload(struct font_t *font, char *path, s32 fontsize);
 /* f_fontfree : frees all resources associated with the font */
 int f_fontfree(struct font_t *font);
 
-/* slide_render : renders the passed in slide to the internal buffer */
-int slide_render(struct slide_t *slide);
+/* slide_render : renders the slide 'idx' into its internal buffer */
+int slide_render(struct show_t *show, s32 idx);
+/* slide_renderchar : renders a single s32 codepoint to x,y position */
+int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y);
 
 /* slide_setbg : sets the background (will draw over everything else) */
 int slide_setbg(struct slide_t *slide);
 
 /* parse_color : parses a color string into a color structure */
 struct color_t parse_color(char *s);
+
+/* m_lblend_u8 : linear blend on u8s */
+u8 m_lblend_u8(u8 a, u8 b, f32 t);
 
 // NOTE these functions were stolen from Rob Pike
 /* regex_match : search for regexp anywhere in text */
@@ -154,7 +159,7 @@ int main(int argc, char **argv)
 
 		slide = slideshow.slides + i;
 
-		rc = slide_render(slide);
+		rc = slide_render(&slideshow, i);
 		if (rc < 0) {
 			fprintf(stderr, "Couldn't render '%s' to the image!\n", slidename);
 			exit(1);
@@ -320,29 +325,82 @@ int show_free(struct show_t *show)
 	return 0;
 }
 
-/* slide_render : renders the passed in slide to the internal buffer */
-int slide_render(struct slide_t *slide)
+/* slide_render : renders the slide 'idx' into its internal buffer */
+int slide_render(struct show_t *show, s32 idx)
 {
-	s32 write_start;
+	struct slide_t *slide;
+	struct fchar_t *fchar;
 	s64 i, j;
+	s32 w_xpos, w_ypos;
 
 	// NOTE (brian) for every single slide in the slideshow, we have to
 	// draw every character for every line
+	//
+	// TODO
+	// 1. Handle Justification
+	// 2. Handle out of bounds indexing
+
+	slide = show->slides + idx;
 
 	slide_setbg(slide);
 
+	// get this figure from image dimensions
+	w_xpos = 32;
+	w_ypos = 64;
 	for (i = 0; i < slide->text_len; i++) {
-		switch (slide->justification) {
-		case SLIDEJUST_LEFT:
-			write_start = 32;
-			break;
-		case SLIDEJUST_CENTER:
-			break;
-		case SLIDEJUST_RIGHT:
-			write_start = slide->img_w - 32;
-			break;
-		default:
-			break;
+		for (j = 0; slide->text[i] && j < strlen(slide->text[i]); j++) {
+			if (slide->text[i][j] != ' ') {
+				fchar = show->font.ftab + slide->text[i][j];
+				printf("%c : ", slide->text[i][j]);
+				slide_renderchar(slide, fchar, w_xpos, w_ypos);
+			}
+
+			w_xpos += fchar->advance;
+		}
+		w_ypos += 32;
+	}
+
+	return 0;
+}
+
+/* slide_renderchar : renders a single s32 codepoint to x,y position */
+int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y)
+{
+	s32 i, j, img_idx, fchar_idx;
+	s32 xpos, ypos;
+	f32 bgscale, fgscale;
+	struct color_t fg, bg;
+	f32 alpha;
+
+	// TODO
+	// 1. Linear Alpha Blending
+
+	printf("%d %d %d %d\n", fchar->f_x, fchar->f_y, fchar->b_x, fchar->b_y);
+
+	memcpy(&fg, &slide->fg, sizeof fg);
+	memcpy(&bg, &slide->bg, sizeof bg);
+
+	for (i = 0; i < fchar->f_x; i++) {
+		for (j = 0; j < fchar->f_y; j++) {
+
+			// NOTE we only include the x/y offset from the upper left of the
+			// buffer when we go to write into the image buffer. This allows
+			// us to use the same index into the font alpha render as into
+			// the image.
+
+			xpos = (i + x) + fchar->b_x;
+			ypos = (j + y) - (fchar->f_y + fchar->b_y);
+			ypos += fchar->b_y;
+
+			img_idx = xpos + ypos * slide->img_w;
+			fchar_idx = i + j * fchar->f_x;
+
+			alpha = fchar->bitmap[fchar_idx] * 1.0f / 255.0f;
+
+			slide->pixels[img_idx].r = m_lblend_u8(bg.r, fg.r, alpha);
+			slide->pixels[img_idx].b = m_lblend_u8(bg.b, fg.b, alpha);
+			slide->pixels[img_idx].g = m_lblend_u8(bg.g, fg.g, alpha);
+			slide->pixels[img_idx].a = 0xff;
 		}
 	}
 
@@ -553,3 +611,10 @@ char *sys_readfile(char *path)
 
 	return buf;
 }
+
+/* m_lblend_u8 : linear blend on u8s */
+u8 m_lblend_u8(u8 a, u8 b, f32 t)
+{
+	return (u8)((a + t * (b - a)) + 0.5f);
+}
+
