@@ -174,7 +174,7 @@ int main(int argc, char **argv)
 
 	// print out all of the slideshow images
 	for (i = 0; i < slideshow.slides_len; i++) {
-		snprintf(slidename, sizeof slidename, "%s_%04ld", slideshow.name, i);
+		snprintf(slidename, sizeof slidename, "%s_%04ld", slideshow.name, (long)i);
 		snprintf(imagename, sizeof imagename, "%s.png", slidename);
 
 		slide = slideshow.slides + i;
@@ -434,7 +434,6 @@ int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y)
 	// 1. Linear Alpha Blending
 
 	memcpy(&fg, &slide->fg, sizeof fg);
-	memcpy(&bg, &slide->bg, sizeof bg);
 
 	for (i = 0; i < fchar->f_x; i++) {
 		for (j = 0; j < fchar->f_y; j++) {
@@ -458,6 +457,7 @@ int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y)
 			fchar_idx = i + j * fchar->f_x;
 
 			alpha = fchar->bitmap[fchar_idx] * 1.0f / 255.0f;
+			memcpy(&bg, &slide->pixels[img_idx], sizeof bg);
 
 			slide->pixels[img_idx].r = m_lblend_u8(bg.r, fg.r, alpha);
 			slide->pixels[img_idx].b = m_lblend_u8(bg.b, fg.b, alpha);
