@@ -174,7 +174,7 @@ int main(int argc, char **argv)
 
 	// print out all of the slideshow images
 	for (i = 0; i < slideshow.slides_len; i++) {
-		snprintf(slidename, sizeof slidename, "%s_%04I64d", slideshow.name, i);
+		snprintf(slidename, sizeof slidename, "%s_%04ld", slideshow.name, i);
 		snprintf(imagename, sizeof imagename, "%s.png", slidename);
 
 		slide = slideshow.slides + i;
@@ -351,15 +351,20 @@ int show_free(struct show_t *show)
 	for (i = 0; i < show->slides_len; i++) {
 		for (j = 0; j < show->slides[i].text_len; j++) {
 			free(show->slides[i].text[j]);
-			free(show->slides[i].pixels);
 		}
 		for (j = 0; j < show->slides[i].images_len; j++) {
 			free(show->slides[i].images[j].pixels);
 			free(show->slides[i].images[j].name);
 		}
+		free(show->slides[i].images);
 		free(show->slides[i].pixels);
 		free(show->slides[i].text);
 	}
+
+	for (i = 0; i < show->font.ftab_len; i++) {
+		free(show->font.ftab[i].bitmap);
+	}
+	free(show->font.ftab);
 
 	free(show->name);
 	free(show->slides);
@@ -532,12 +537,14 @@ int slide_renderimage(struct slide_t *slide, struct image_t *image, s32 x, s32 y
 		for (j = 0; j < bound_h; j++) {
 			dst = (i + bound_x) + (j + bound_y) * slide->img_w;
 			src = i + j * bound_w;
-			slide->pixels[dst].r = image->pixels[src].r;
-			slide->pixels[dst].g = image->pixels[src].g;
-			slide->pixels[dst].b = image->pixels[src].b;
-			slide->pixels[dst].a = image->pixels[src].a;
+			slide->pixels[dst].r = iscaled[src].r;
+			slide->pixels[dst].g = iscaled[src].g;
+			slide->pixels[dst].b = iscaled[src].b;
+			slide->pixels[dst].a = iscaled[src].a;
 		}
 	}
+
+	free(iscaled);
 
 	return 0;
 }
