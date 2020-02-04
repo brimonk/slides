@@ -8,6 +8,10 @@
  * TODO
  * 1. More color formats than just a Hex String (0xDDDDDD). Like, integers, or
  *    floating point color.
+ * 2. Generic function that takes an input buffer, output buffer, dimensions
+ *    of both, and desired location on the output. Currently, there are a few
+ *    direct-to-image copy functions, and they could probably be baked into
+ *    one.
  */
 
 #include <stdio.h>
@@ -43,11 +47,23 @@ struct color_t {
 	u8 r, g, b, a;
 };
 
-struct slide_t {
+// NOTE
+// currently, the slideshow program attempts to center the image and will
+// overlay images one at a time. Ideally, you'll eventually be able to
+// tell the image where it should go
+struct image_t {
 	struct pixel_t *pixels;
 	s32 img_w, img_h;
+	char *name;
+};
+
+struct slide_t {
+	struct pixel_t *pixels;
+	s32 img_w, img_h; // misleading - w and h of the output image
 	char **text;
 	size_t text_len, text_cap;
+	struct image_t *images;
+	size_t images_len, images_cap;
 	s32 justification;
 	struct color_t bg, fg;
 };
@@ -108,6 +124,8 @@ s32 f_vertadvance(struct font_t *font);
 int slide_render(struct show_t *show, s32 idx);
 /* slide_renderchar : renders a single s32 codepoint to x,y position */
 int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y);
+/* slide_renderimage : renders the image to the slide */
+int slide_renderimage(struct slide_t *slide, struct image_t *image, s32 x, s32 y);
 
 /* slide_setbg : sets the background (will draw over everything else) */
 int slide_setbg(struct slide_t *slide);
@@ -140,7 +158,7 @@ int main(int argc, char **argv)
 {
 	struct show_t slideshow;
 	struct slide_t *slide;
-	size_t i, j;
+	size_t i;
 	int rc;
 	char slidename[BUFSMALL];
 	char imagename[BUFSMALL];
@@ -188,11 +206,11 @@ int show_load(struct show_t *show, char *config)
 {
 	FILE *fp;
 	char *s;
-	s32 i, j, len;
 	struct slide_t *slide;
-	struct color_t color;
-	char buf[BUFLARGE];
+	struct image_t *image;
+	s32 len;
 	int rc;
+	char buf[BUFLARGE];
 
 	// TODO
 	// this would probably be better with tokenized strings
@@ -227,7 +245,6 @@ int show_load(struct show_t *show, char *config)
 			}
 
 			c_resize(&show->slides, &show->slides_len, &show->slides_cap, sizeof(struct slide_t));
-
 			slide = show->slides + show->slides_len;
 
 			slide->img_w = DEFAULT_WIDTH;
@@ -253,6 +270,25 @@ int show_load(struct show_t *show, char *config)
 		} else if (regex_match("^: fontsize", s)) {
 			s = ltrim(s + strlen(": fontsize"));
 			show->fontsize = atoi(s);
+
+		} else if (regex_match("^: image", s)) {
+			s = ltrim(s + strlen(": image"));
+			slide = show->slides + show->slides_len;
+
+			// attempt to load the image
+			c_resize(&slide->images, &slide->images_len, &slide->images_cap, sizeof(struct image_t));
+
+			image = slide->images + slide->images_len++;
+
+			s32 n;
+			n = 0;
+			image->pixels = (struct pixel_t *)stbi_load(s, &image->img_w, &image->img_h, &n, 4);
+			printf("components in image %d\n", n);
+			if (!image->pixels) {
+				fprintf(stderr, "Couldn't load image file '%s'\n", s);
+				return -1;
+			}
+			image->name = strdup(s);
 
 		} else if (regex_match("^: justified", s)) {
 			s = ltrim(s + strlen(": justified"));
@@ -317,6 +353,10 @@ int show_free(struct show_t *show)
 			free(show->slides[i].text[j]);
 			free(show->slides[i].pixels);
 		}
+		for (j = 0; j < show->slides[i].images_len; j++) {
+			free(show->slides[i].images[j].pixels);
+			free(show->slides[i].images[j].name);
+		}
 		free(show->slides[i].pixels);
 		free(show->slides[i].text);
 	}
@@ -332,9 +372,11 @@ int slide_render(struct show_t *show, s32 idx)
 {
 	struct slide_t *slide;
 	struct fchar_t *fchar;
+	struct image_t *image;
 	s64 i, j;
 	s32 w_xpos, w_ypos;
 	s32 yadv;
+	int rc;
 
 	// NOTE (brian) for every single slide in the slideshow, we have to
 	// draw every character for every line
@@ -347,10 +389,18 @@ int slide_render(struct show_t *show, s32 idx)
 
 	slide_setbg(slide);
 
+	// first, we draw all of our images
+	for (i = 0; i < slide->images_len; i++) {
+		image = slide->images + i;
+		rc = slide_renderimage(slide, image, -1, -1);
+	}
+
 	// get this figure from image dimensions
 	w_ypos = 64;
 	yadv = f_vertadvance(&show->font);
 
+	// then we draw text over it
+	// (who, if anyone ever, wants text UNDER their slide? Not me)
 	for (i = 0; i < slide->text_len; i++) {
 		w_xpos = 32;
 		for (j = 0; slide->text[i] && j < strlen(slide->text[i]); j++) {
@@ -392,6 +442,13 @@ int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y)
 			xpos = (i + x) + fchar->b_x;
 			ypos = (j + y) + fchar->b_y;
 
+			if (xpos < 0 || xpos > slide->img_w) {
+				continue;
+			}
+			if (ypos < 0 || ypos > slide->img_h) {
+				continue;
+			}
+
 			img_idx = xpos + ypos * slide->img_w;
 			fchar_idx = i + j * fchar->f_x;
 
@@ -401,6 +458,84 @@ int slide_renderchar(struct slide_t *slide, struct fchar_t *fchar, s32 x, s32 y)
 			slide->pixels[img_idx].b = m_lblend_u8(bg.b, fg.b, alpha);
 			slide->pixels[img_idx].g = m_lblend_u8(bg.g, fg.g, alpha);
 			slide->pixels[img_idx].a = 0xff;
+		}
+	}
+
+	return 0;
+}
+
+/* slide_renderimage : renders the image to the slide */
+int slide_renderimage(struct slide_t *slide, struct image_t *image, s32 x, s32 y)
+{
+	struct pixel_t *iscaled; // image scaled
+	s32 bound_x, bound_y, bound_w, bound_h;
+	s32 img_w, img_h, win_w, win_h;
+	s32 i, j, dst, src;
+	f32 scale;
+	int rc;
+
+	// NOTE (brian)
+	// Before we even attempt to render the image to the window, we have to
+	// determine where in X and Y we can actually fit the image onto the screen.
+	//
+	// We do this by determining the dimensions it has to fit in, then calling
+	// stbir_resize_uint8 on those dimensions, then copying it to the image.
+
+	img_w = image->img_w;
+	img_h = image->img_h;
+	win_w = slide->img_w;
+	win_h = slide->img_h;
+
+	scale = 1.0f;
+
+	if (win_w < img_w) {
+		scale = (f32)win_w / img_w;
+	}
+
+	if (win_h < img_h) {
+		scale = (f32)win_h / img_h;
+	}
+
+	img_w *= scale;
+	img_h *= scale;
+
+	if (img_w <= win_w && img_h <= win_h) {
+		// copy over parameters if we can fit in the window
+		bound_w = img_w;
+		bound_h = img_h;
+		bound_x = (win_w - img_w) / 2;
+		bound_y = (win_h - img_h) / 2;
+	} else if (win_h < img_h) {
+		// move the picture to be centered in x
+		bound_w = (int)roundf(((f32)img_w * win_h) / img_h);
+		bound_h = win_h;
+		bound_x = (win_w - bound_w) / 2;
+		bound_y = 0;
+	} else if (win_w < img_w) {
+		// move the picture to be centered in y
+		bound_w = win_w;
+		bound_h = (int)roundf(((f32)win_h * img_w) / win_w);
+		bound_x = 0;
+		bound_y = (win_w - bound_h) / 2;
+	}
+
+	// before we can put images on the framebuffer, we have to scale them
+	iscaled = calloc(bound_w * bound_h, sizeof(struct pixel_t));
+	rc = stbir_resize_uint8((const u8 *)image->pixels, image->img_w, image->img_h, 0, (u8 *)iscaled, bound_w, bound_h, 0, 4);
+	if (!rc) { // success
+		fprintf(stderr, "Couldn't scale image '%s'\n", image->name);
+		return -1;
+	}
+
+	// now we can put the image onto the canvas
+	for (i = 0; i < bound_w; i++) {
+		for (j = 0; j < bound_h; j++) {
+			dst = (i + bound_x) + (j + bound_y) * slide->img_w;
+			src = i + j * bound_w;
+			slide->pixels[dst].r = image->pixels[src].r;
+			slide->pixels[dst].g = image->pixels[src].g;
+			slide->pixels[dst].b = image->pixels[src].b;
+			slide->pixels[dst].a = image->pixels[src].a;
 		}
 	}
 
@@ -462,7 +597,6 @@ int f_fontload(struct font_t *font, char *path, s32 fontsize)
 	f32 scale_x, scale_y;
 	s32 i, w, h, xoff, yoff, advance, lsb;
 	unsigned char *ttf_buffer, *bitmap;
-	int rc;
 
 	// TODO (brian)
 	// Come back through here and if you want anything other than ascii,
@@ -576,8 +710,6 @@ char *rtrim(char *s)
 /* c_resize : resizes the ptr, should length and capacity be the same */
 void c_resize(void *ptr, size_t *len, size_t *cap, size_t bytes)
 {
-	size_t i;
-	u8 *b;
 	void **p;
 
 	if (*len == *cap) {
@@ -591,6 +723,8 @@ void c_resize(void *ptr, size_t *len, size_t *cap, size_t bytes)
 
 		// set the rest of the elements to zero
 #if 0
+		u8 *b;
+		size_t i;
 		for (b = ((u8 *)*p) + *len * bytes, i = *len; i < *cap; b += bytes, i++) {
 			memset(b, 0, bytes);
 		}
