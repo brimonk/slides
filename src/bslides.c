@@ -12,6 +12,8 @@
  *    of both, and desired location on the output. Currently, there are a few
  *    direct-to-image copy functions, and they could probably be baked into
  *    one.
+ * 3. Have the concept of a "directive". A directive can be things like
+ *    - write line of text, change font, change fontsize, change text color, etc
  */
 
 #include <stdio.h>
@@ -37,6 +39,7 @@
 #define DEFAULT_FONTSIZE   (15)
 #define DEFAULT_COLORBG    ("0x3366cc")
 #define DEFAULT_COLORFG    ("0xffcccc")
+#define DEFAULT_FONT_SIZE  (32)
 #define MAX_LINES_ON_SLIDE (32)
 
 struct pixel_t {
@@ -57,23 +60,19 @@ struct image_t {
 	char *name;
 };
 
-struct slide_t {
-	struct pixel_t *pixels;
-	s32 img_w, img_h; // misleading - w and h of the output image
-	char **text;
-	size_t text_len, text_cap;
-	struct image_t *images;
-	size_t images_len, images_cap;
-	s32 justification;
-	struct color_t bg, fg;
+struct string_t {
+	char *text;
 };
 
 enum {
-	  FONTT_NONE
-	, FONTT_REG
-	, FONTT_ITAL
-	, FONTT_BOLD
-	, FONTT_TOTAL
+	  DIRECT_NONE
+	, DIRECT_TEXT
+	, DIRECT_JUSTIFICATION
+	, DIRECT_TOTAL
+};
+
+struct directive_t {
+	s32 type;
 };
 
 enum {
@@ -84,8 +83,30 @@ enum {
 	, SLIDEJUST_TOTAL
 };
 
+struct slide_t {
+	struct image_t *images;
+	size_t images_len, images_cap;
+	struct string_t *strings;
+	size_t strings_len, strings_cap;
+
+	// The array of directives, modifies the (hopefully shallow) state (below)
+	// of the slide. The renderer makes a copy of this structure, at render time
+	// into the rendering function, and uses that.
+	struct directive_t *directives;
+	size_t directives_len, directives_cap;
+
+	size_t image_curr;
+	size_t string_curr;
+	size_t directive_curr;
+
+	struct color_t bg, fg;
+	s32 text_just;
+};
+
 struct fchar_t {
 	u8 *bitmap;
+	u32 codepoint;
+	u32 fontsize;
 	s32 f_x; // font size (in pixels)
 	s32 f_y;
 	s32 b_x; // bearing information
@@ -94,29 +115,37 @@ struct fchar_t {
 };
 
 struct font_t {
-	int type;
+	char *name;
 	char *path;
+	char *ttfbuffer;
 	struct fchar_t *ftab;
 	size_t ftab_len, ftab_cap;
 };
 
 struct show_t {
+	struct pixel_t *pixels;
+	s32 img_w, img_h; // misleading - w and h of the output framebuffer
 	struct slide_t *slides;
 	size_t slides_len, slides_cap;
 	size_t slide_curr;
-	struct font_t font;
-	s32 fontsize;
+	struct font_t *fonts;
+	size_t fonts_len, fonts_cap;
 	char *name;
+	u32 fontsize_curr;
 };
 
 /* show_load : load up the slideshow from the config file */
 int show_load(struct show_t *show, char *config);
 /* show_free : frees everything related to the slideshow */
 int show_free(struct show_t *show);
-/* f_fontload : load as many ascii characters into the font table as possible */
-int f_fontload(struct font_t *font, char *path, s32 fontsize);
-/* f_fontfree : frees all resources associated with the font */
-int f_fontfree(struct font_t *font);
+
+/* f_load : sets up an entry in the font table with these params */
+s32 f_load(struct show_t *show, char *path, char *name);
+/* f_getcodepoint : retrieves the fchar_t from input font and codepoint */
+struct fchar_t *f_getcodepoint(struct show_t *show, char *name, u32 codepoint, u32 fontsize);
+/* f_free : frees all fonts associated with the slideshow */
+s32 f_free(struct show_t *show);
+
 /* f_vertadvance : returns the desired font vertical advance value */
 s32 f_vertadvance(struct font_t *font);
 
@@ -135,6 +164,8 @@ struct color_t parse_color(char *s);
 
 /* m_lblend_u8 : linear blend on u8s */
 u8 m_lblend_u8(u8 a, u8 b, f32 t);
+/* streq : return true if strings are equivalent */
+int streq(char *s, char *t);
 
 // NOTE these functions were stolen from Rob Pike
 /* regex_match : search for regexp anywhere in text */
@@ -185,7 +216,7 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		rc = stbi_write_png(imagename, slide->img_w, slide->img_h, sizeof(struct pixel_t), slide->pixels, sizeof(struct pixel_t) * slide->img_w);
+		rc = stbi_write_png(imagename, slideshow.img_w, slideshow.img_h, sizeof(struct pixel_t), slideshow.pixels, sizeof(struct pixel_t) * slideshow.img_w);
 		if (!rc) {
 			fprintf(stderr, "Couldn't write %s!\n", imagename);
 			exit(1);
@@ -209,19 +240,24 @@ int show_load(struct show_t *show, char *config)
 	struct slide_t *slide;
 	struct image_t *image;
 	s32 len;
-	int rc;
+	int rc, i;
+	char *tokens[BUFSMALL];
 	char buf[BUFLARGE];
 
 	// TODO
 	// this would probably be better with tokenized strings
 
 	memset(show, 0, sizeof(*show));
+	memset(tokens, 0, sizeof tokens);
 
 	fp = fopen(config, "r");
 
 	if (!fp) {
 		return -1;
 	}
+
+	// set some default parameters
+	show->fontsize_curr = DEFAULT_FONT_SIZE;
 
 	while (buf == fgets(buf, sizeof buf, fp)) {
 		// trim the string to remove whitespace
@@ -233,100 +269,90 @@ int show_load(struct show_t *show, char *config)
 			continue;
 		}
 
-		if (regex_match("^//", buf) || regex_match("^#", buf)) {
+		for (i = 0, s = strtok(buf, " "); i < ARRSIZE(tokens) && s; i++, s = strtok(NULL, " ")) {
+			tokens[i] = s;
+		}
+
+		if (streq("//", tokens[0]) || streq("#", tokens[0])) {
 			continue;
 		}
 
-		// now, we check to see if the string that we have matches
-		// a regular expression
-		if (regex_match("^: newslide$", s)) {
-			if (show->slides_cap != 0) {
-				show->slides_len++;
+		if (streq(":", tokens[0])) { // parse a command/directive
+
+			if (streq("newslide", tokens[1])) {
+				if (show->slides_cap != 0) {
+					show->slides_len++;
+				}
+
+				c_resize(&show->slides, &show->slides_len, &show->slides_cap, sizeof(struct slide_t));
+				slide = show->slides + show->slides_len;
+				c_resize(&slide->strings, &slide->strings_len, &slide->strings_cap, sizeof(*slide->strings));
+
+			} else if (streq("font ", tokens[1])) {
+				// TODO fix fonts!
+				// NOTE we assume the file path is a single
+				rc = f_load(show, tokens[3], tokens[2]);
+				if (rc < 0) {
+					fprintf(stderr, "Couldn't load the font!\n");
+					return -1;
+				}
+
+			} else if (streq("name", tokens[1])) {
+				show->name = strdup(tokens[2]);
+
+			} else if (streq("color", tokens[1])) {
+				slide = show->slides + show->slides_len;
+				struct color_t *colorptr;
+
+				if (streq("bg", tokens[2])) {
+					colorptr = &slide->bg;
+				} else if (streq("fg", tokens[2])) {
+					colorptr = &slide->fg;
+				} else {
+					fprintf(stderr, "Unrecognized Color Type'%s'\n", tokens[2]);
+				}
+
+				*colorptr = parse_color(tokens[3]);
+
+			} else if (streq("fontsize", tokens[1])) {
+				show->fontsize = atoi(tokens[2]);
+
+			} else if (streq("image", tokens[1])) { // attempt to load the image
+				slide = show->slides + show->slides_len;
+
+				c_resize(&slide->images, &slide->images_len, &slide->images_cap, sizeof(struct image_t));
+				image = slide->images + slide->images_len++;
+
+				image->pixels = (struct pixel_t *)stbi_load(tokens[2], &image->img_w, &image->img_h, NULL, 4);
+				if (!image->pixels) {
+					fprintf(stderr, "Couldn't load image file '%s'\n", tokens[2]);
+					return -1;
+				}
+				image->name = strdup(tokens[2]);
+
+			} else if (streq("imagesize", tokens[1])) {
+				show->img_w = atoi(tokens[2]);
+				show->img_h = atoi(tokens[3]);
+
+			} else if (streq("justification", tokens[1])) {
+				slide = show->slides + show->slides_len;
+
+				if (strcmp(tokens[2], "left") == 0) {
+					slide->justification = SLIDEJUST_LEFT;
+				} else if (strcmp(tokens[2], "center") == 0) {
+					slide->justification = SLIDEJUST_CENTER;
+				} else if (strcmp(tokens[2], "right") == 0) {
+					slide->justification = SLIDEJUST_RIGHT;
+				} else {
+					slide->justification = SLIDEJUST_NONE;
+				}
+
+			} else if (streq("blank", tokens[1])) {
+				slide = show->slides = show->slides_len;
+				slide->text_len++;
 			}
 
-			c_resize(&show->slides, &show->slides_len, &show->slides_cap, sizeof(struct slide_t));
-			slide = show->slides + show->slides_len;
-
-			slide->img_w = DEFAULT_WIDTH;
-			slide->img_h = DEFAULT_HEIGHT;
-			slide->text_cap = MAX_LINES_ON_SLIDE;
-			slide->text_len = 0;
-			slide->text = calloc(slide->text_cap, sizeof(char *));
-			slide->pixels = calloc(slide->img_w * slide->img_h, sizeof(*slide->pixels));
-
-		} else if (regex_match("^: font ", s)) {
-			// NOTE we assume the file path is a single
-			s = ltrim(s + strlen(": font"));
-			rc = f_fontload(&show->font, s, show->fontsize ? show->fontsize : DEFAULT_FONTSIZE);
-			if (rc < 0) {
-				fprintf(stderr, "Couldn't load the font!\n");
-				return -1;
-			}
-
-		} else if (regex_match("^: name", s)) {
-			s = ltrim(s + strlen(": name"));
-			show->name = strdup(s);
-
-		} else if (regex_match("^: fontsize", s)) {
-			s = ltrim(s + strlen(": fontsize"));
-			show->fontsize = atoi(s);
-
-		} else if (regex_match("^: image", s)) {
-			s = ltrim(s + strlen(": image"));
-			slide = show->slides + show->slides_len;
-
-			// attempt to load the image
-			c_resize(&slide->images, &slide->images_len, &slide->images_cap, sizeof(struct image_t));
-
-			image = slide->images + slide->images_len++;
-
-			s32 n;
-			n = 0;
-			image->pixels = (struct pixel_t *)stbi_load(s, &image->img_w, &image->img_h, &n, 4);
-			printf("components in image %d\n", n);
-			if (!image->pixels) {
-				fprintf(stderr, "Couldn't load image file '%s'\n", s);
-				return -1;
-			}
-			image->name = strdup(s);
-
-		} else if (regex_match("^: justified", s)) {
-			s = ltrim(s + strlen(": justified"));
-
-			slide = show->slides + show->slides_len;
-
-			if (strcmp(s, "left") == 0) {
-				slide->justification = SLIDEJUST_LEFT;
-			} else if (strcmp(s, "center") == 0) {
-				slide->justification = SLIDEJUST_CENTER;
-			} else if (strcmp(s, "right") == 0) {
-				slide->justification = SLIDEJUST_RIGHT;
-			} else {
-				slide->justification = SLIDEJUST_NONE;
-			}
-
-		} else if (regex_match("^: blank", s)) {
-			slide->text_len++;
-
-		} else if (regex_match("^: color", s)) {
-			slide = show->slides + show->slides_len;
-			s = ltrim(s + strlen(": color"));
-
-			if (s[0] == 'b' && s[1] == 'g') {
-				s += 2;
-				s = ltrim(strchr(s, ' '));
-				slide->bg = parse_color(s);
-
-			} else if (s[0] == 'f' && s[1] == 'g') {
-				s += 2;
-				s = ltrim(strchr(s, ' '));
-				slide->fg = parse_color(s);
-
-			} else {
-				fprintf(stderr, "Unrecognized Color '%s'\n", s);
-			}
-
-		} else {
+		} else { // copy a line of text into the slideshow text buffer
 			slide = show->slides + show->slides_len;
 			assert(slide->text_len != MAX_LINES_ON_SLIDE);
 			slide->text[slide->text_len++] = strdup(s);
@@ -597,47 +623,78 @@ s32 f_vertadvance(struct font_t *font)
 	return ret;
 }
 
-/* f_fontload : load as many ascii characters into the font table as possible */
-int f_fontload(struct font_t *font, char *path, s32 fontsize)
+/* f_getcodepoint : retrieves the fchar_t from input font and codepoint */
+struct fchar_t *f_getcodepoint(struct show_t *show, char *name, u32 codepoint, u32 fontsize)
 {
-	stbtt_fontinfo fontinfo;
-	f32 scale_x, scale_y;
-	s32 i, w, h, xoff, yoff, advance, lsb;
-	unsigned char *ttf_buffer, *bitmap;
+	struct font_t *font;
+	size_t i;
 
-	// TODO (brian)
-	// Come back through here and if you want anything other than ascii,
-	// make a hot-loading glyph situation. When doing this, the rasterizing
-	// 
+	// NOTE (brian) don't use this without the font table being initialized
 
-	ttf_buffer = (unsigned char *)sys_readfile(path);
-	if (!ttf_buffer) {
-		fprintf(stderr, "Couldn't read fontfile [%s]\n", path);
-		exit(1);
+	for (i = 0; i < show->fonts_len; i++) {
+		if (streq(show->fonts[i].name, name)) {
+			font = show->fonts + i;
+		}
 	}
 
-	stbtt_InitFont(&fontinfo, ttf_buffer, stbtt_GetFontOffsetForIndex(ttf_buffer, 0));
+	if (!font) {
+		return NULL;
+	}
+
+	// TODO (brian) make searching the font in the table, not terribly slow
+	// for large amounts
+
+	for (i = 0; i < font->ftab_len; i++) {
+		if (font->ftab[i].codepoint == codepoint && font->ftab[i].fontsize == fontsize) {
+			return font->ftab + i;
+		}
+	}
+
+	// NOTE (brian) if we get here, we didn't find the codepoint, so we
+	// have to render a new one
+
+	c_resize(&font->ftab, &font->ftab_len, &font->ftab_cap, sizeof(*font->ftab));
+
+	stbtt_fontinfo fontinfo;
+	f32 scale_x, scale_y;
+	s32 w, h, xoff, yoff, advance, lsb;
+	u8 *bitmap;
+
+	stbtt_InitFont(&fontinfo, (unsigned char *)font->ttfbuffer, stbtt_GetFontOffsetForIndex((unsigned char *)font->ttfbuffer, 0));
 	scale_y = stbtt_ScaleForPixelHeight(&fontinfo, fontsize);
 	scale_x = scale_y;
 
-	for (i = 0; i < 128; i++) {
-		bitmap = stbtt_GetCodepointBitmap(&fontinfo, scale_x, scale_y, i, &w, &h, &xoff, &yoff);
+	bitmap = stbtt_GetCodepointBitmap(&fontinfo, scale_x, scale_y, i, &w, &h, &xoff, &yoff);
 
-		stbtt_GetCodepointHMetrics(&fontinfo, i, &advance, &lsb);
+	stbtt_GetCodepointHMetrics(&fontinfo, (int)codepoint, &advance, &lsb);
 
-		c_resize(&font->ftab, &font->ftab_len, &font->ftab_cap, sizeof(struct fchar_t));
+	font->ftab[font->ftab_len].bitmap  = bitmap;
+	font->ftab[font->ftab_len].f_x     = w;
+	font->ftab[font->ftab_len].f_y     = h;
+	font->ftab[font->ftab_len].b_x     = xoff;
+	font->ftab[font->ftab_len].b_y     = yoff;
+	font->ftab[font->ftab_len].advance = advance * scale_x;
 
-		font->ftab[font->ftab_len].bitmap  = bitmap;
-		font->ftab[font->ftab_len].f_x     = w;
-		font->ftab[font->ftab_len].f_y     = h;
-		font->ftab[font->ftab_len].b_x     = xoff;
-		font->ftab[font->ftab_len].b_y     = yoff;
-		font->ftab[font->ftab_len].advance = advance * scale_x;
+	font->ftab_len++;
 
-		font->ftab_len++;
+	return font->ftab + i;
+}
+
+/* f_load : sets up an entry in the font table with these params */
+s32 f_load(struct show_t *show, char *path, char *name)
+{
+	c_resize(&show->fonts, &show->fonts_len, &show->fonts_cap, sizeof(*show->fonts));
+
+	show->fonts[show->fonts_len].ttfbuffer = sys_readfile(path);
+
+	if (!show->fonts[show->fonts_len].ttfbuffer) {
+		return -1;
 	}
 
-	free(ttf_buffer);
+	show->fonts[show->fonts_len].name = strdup(name);
+	show->fonts[show->fonts_len].path = strdup(path);
+
+	show->fonts_len++;
 
 	return 0;
 }
@@ -771,5 +828,11 @@ char *sys_readfile(char *path)
 u8 m_lblend_u8(u8 a, u8 b, f32 t)
 {
 	return (u8)((a + t * (b - a)) + 0.5f);
+}
+
+/* streq : return true if strings are equivalent */
+int streq(char *s, char *t)
+{
+	return s && t && strcmp(s, t) == 0;
 }
 
