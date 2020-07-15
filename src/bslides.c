@@ -2,18 +2,16 @@
  * Brian's Slideshow Program
  * Sat Feb 01, 2020 20:26
  *
- * NOTE (brian)
- * All this slideshow program is going to do for now, is render to some images.
- *
  * TODO
- * 1. More color formats than just a Hex String (0xDDDDDD). Like, integers, or
- *    floating point color.
- * 2. Generic function that takes an input buffer, output buffer, dimensions
- *    of both, and desired location on the output. Currently, there are a few
- *    direct-to-image copy functions, and they could probably be baked into
- *    one.
- * 3. Have the concept of a "directive". A directive can be things like
- *    - write line of text, change font, change fontsize, change text color, etc
+ * 0. Include the "regular" common single header lib
+ * 1. Convert all of the slideshow directives into single C functions, in a DLL
+ * 2. Open an SDL-ish Window and render the slideshow in real time
+ * 3. Convert rendering into a programmable function situation
+ * 4. Create a DLL loader, and read exported functions as viable candidate. Use the real name of the
+ *    function as the name in the slideshow file to use
+ *
+ * BUGS
+ * - using a font that isn't aliased crashes the program
  */
 
 #include <stdio.h>
@@ -194,10 +192,15 @@ int main(int argc, char **argv)
 	char slidename[BUFSMALL];
 	char imagename[BUFSMALL];
 
+	if (argc < 2) {
+		fprintf(stderr, "USAGE : %s config\n", argv[0]);
+		exit(1);
+	}
+
 	memset(slidename, 0, sizeof slidename);
 	memset(imagename, 0, sizeof imagename);
 
-	rc = show_load(&slideshow, "show.cfg");
+	rc = show_load(&slideshow, argv[1]);
 	if (rc < 0) {
 		fprintf(stderr, "Couldn't load up the slideshow!\n");
 		exit(1);
@@ -207,6 +210,8 @@ int main(int argc, char **argv)
 	for (i = 0; i < slideshow.slides_len; i++) {
 		snprintf(slidename, sizeof slidename, "%s_%04ld", slideshow.name, (long)i);
 		snprintf(imagename, sizeof imagename, "%s.png", slidename);
+
+		printf("%s\n", imagename);
 
 		rc = show_render(&slideshow, i);
 		if (rc < 0) {
@@ -439,11 +444,11 @@ int show_render(struct show_t *show, size_t idx)
 	}
 
 	// get this figure from image dimensions
-	w_ypos = 64;
+	w_ypos = show->img_h / 12;
 
 	// then we draw text over it, no text under slides
 	for (i = 0; i < slide->strings_len; i++) {
-		w_xpos = 32;
+		w_xpos = show->img_w / 12;
 		for (j = 0; slide->strings[i].text && j < strlen(slide->strings[i].text); j++) {
 			if (slide->strings[i].text[j] != ' ') {
 				fchar = f_getcodepoint(show, fontname, slide->strings[i].text[j], fontsize);
