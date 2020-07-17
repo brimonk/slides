@@ -10,6 +10,22 @@
  * 4. Create a DLL loader, and read exported functions as viable candidate. Use the real name of the
  *    function as the name in the slideshow file to use
  *
+ * COMMANDS (Completed)
+ *
+ * COMMANDS (Incompleted)
+ *   newslide
+ *   printline
+ *   blank
+ *   image
+ *   font
+ *   fontset
+ *   fontsize
+ *   maketemplate
+ *   templateset
+ *   usetemplate
+ *   justified
+ *   defer
+ *
  * BUGS
  * - using a font that isn't aliased crashes the program
  */
@@ -21,6 +37,7 @@
 #include <time.h>
 #include <ctype.h>
 
+#define COMMON_IMPLEMENTATION
 #include "common.h"
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -40,6 +57,8 @@
 #define DEFAULT_COLORFG    ("0xffcccc")
 #define DEFAULT_FONT_SIZE  (32)
 #define MAX_LINES_ON_SLIDE (32)
+
+#define MAX_FUNCTIONS (64)
 
 struct pixel_t {
 	u8 r, g, b, a;
@@ -79,17 +98,6 @@ enum {
 	, SLIDEJUST_TOTAL
 };
 
-struct slide_t {
-	struct image_t *images;
-	size_t images_len, images_cap;
-	size_t image_curr;
-	struct string_t *strings;
-	size_t strings_len, strings_cap;
-	size_t string_curr;
-	char *fontname;
-	s32 fontsize;
-};
-
 struct fchar_t {
 	u8 *bitmap;
 	u32 codepoint;
@@ -114,24 +122,78 @@ struct font_t {
 	s32 metricsread;
 };
 
+struct command_t {
+	int argc;
+	char **argv;
+};
+
+struct slide_t {
+	struct image_t *images;
+	size_t images_len, images_cap;
+	size_t image_curr;
+	struct string_t *strings;
+	size_t strings_len, strings_cap;
+	size_t string_curr;
+	char *fontname;
+	s32 fontsize;
+};
+
+struct template_t {
+	char *id;
+	s32 justification;
+	color_t fg, bg;
+};
+
+struct settings_t {
+	s32 fontsize;
+	char *fontname;
+	s32 slide;
+};
+
+struct show_t;
+
+typedef int (showfunc_t) (struct show_t *, int, char **);
+
+struct function_t {
+	char *name;
+	showfunc_t *func;
+};
+
 struct show_t {
+	struct pixel_t *fbuffer_bg, *fbuffer_fg;
 	struct pixel_t *pixels;
 	s32 img_w, img_h; // misleading - w and h of the output framebuffer
 	struct slide_t *slides;
 	size_t slides_len, slides_cap;
+	struct template_t *templates;
+	size_t templates_len, templates_cap;
+	struct function_t functions[MAX_FUNCTIONS];
+	size_t functions_len;
 	struct font_t *fonts;
 	size_t fonts_len, fonts_cap;
 	char *name;
 	char *fontname;
 	u32 fontsize;
 	struct color_t bg, fg;
+	struct settings_t defaults;
+	struct settings_t settings;
 };
 
+// Slideshow Init & Free Functions
 /* show_load : load up the slideshow from the config file */
 int show_load(struct show_t *show, char *config);
 /* show_free : frees everything related to the slideshow */
 int show_free(struct show_t *show);
 
+// Slideshow Rendering Functions
+/* show_render : renders the slide 'idx' into its internal buffer */
+int show_render(struct show_t *show, size_t idx);
+/* show_renderchar : renders a single s32 codepoint to x,y position */
+int show_renderchar(struct show_t *show, struct fchar_t *fchar, color_t color, s32 x, s32 y);
+/* show_renderimage : renders the image to the slide */
+int show_renderimage(struct show_t *slide, struct image_t *image, s32 x, s32 y);
+
+// Font Functions
 /* f_load : sets up an entry in the font table with these params */
 s32 f_load(struct show_t *show, char *path, char *name);
 /* f_getfont : returns a pointer to the font structure with the matching name */
@@ -142,13 +204,6 @@ struct fchar_t *f_getcodepoint(struct show_t *show, char *name, u32 codepoint, u
 s32 f_free(struct show_t *show);
 /* f_vertadvance : returns the font's vertical advance */
 s32 f_vertadvance(struct font_t *font);
-
-/* show_render : renders the slide 'idx' into its internal buffer */
-int show_render(struct show_t *show, size_t idx);
-/* show_renderchar : renders a single s32 codepoint to x,y position */
-int show_renderchar(struct show_t *show, struct fchar_t *fchar, color_t color, s32 x, s32 y);
-/* show_renderimage : renders the image to the slide */
-int show_renderimage(struct show_t *slide, struct image_t *image, s32 x, s32 y);
 
 /* show_setbg : sets the background (will draw over everything else) */
 int show_setbg(struct show_t *show, color_t color);
@@ -163,26 +218,6 @@ struct color_t parse_color(char *s);
 
 /* m_lblend_u8 : linear blend on u8s */
 u8 m_lblend_u8(u8 a, u8 b, f32 t);
-/* streq : return true if strings are equivalent */
-int streq(char *s, char *t);
-
-// NOTE these functions were stolen from Rob Pike
-/* regex_match : search for regexp anywhere in text */
-int regex_match(char *regexp, char *text);
-/* regex_matchhere: search for regexp at beginning of text */
-int regex_matchhere(char *regexp, char *text);
-/* regex_matchstar: search for c*regexp at beginning of text */
-int regex_matchstar(int c, char *regexp, char *text);
-
-/* ltrim : removes whitespace on the "left" (start) of the string */
-char *ltrim(char *s);
-/* rtrim : removes whitespace on the "right" (end) of the string */
-char *rtrim(char *s);
-
-/* c_resize : resizes the ptr should length and capacity be the same */
-void c_resize(void *ptr, size_t *len, size_t *cap, size_t bytes);
-/* sys_readfile : reads an entire file into a memory buffer */
-char *sys_readfile(char *path);
 
 int main(int argc, char **argv)
 {
@@ -205,6 +240,9 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Couldn't load up the slideshow!\n");
 		exit(1);
 	}
+
+	// hook up the default functions
+	functab_add(&slideshow, "blank", func_blank);
 
 	// print out all of the slideshow images
 	for (i = 0; i < slideshow.slides_len; i++) {
@@ -231,6 +269,26 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Couldn't free the slideshow!\n");
 		exit(1);
 	}
+
+	return 0;
+}
+
+/* func_blank : implements the "blank" function */
+int func_blank(struct show_t *show, int argc, char **argv)
+{
+	assert(show);
+
+	return 0;
+}
+
+/* functab_add : adds a callable function into the show */
+int functab_add(struct show_t *show, char *name, showfunc_t func)
+{
+	assert(show);
+	assert(show->functions_len < MAX_FUNCTIONS);
+
+	show->functions[show->functions_len++].name = strdup(name);
+	show->functions[show->functions_len++].func = func;
 
 	return 0;
 }
@@ -760,124 +818,9 @@ s32 s_getfontsize(struct show_t *show, struct slide_t *slide)
 	return show->fontsize;
 }
 
-/* regex_match : search for regexp anywhere in text */
-int regex_match(char *regexp, char *text)
-{
-	if (regexp[0] == '^')
-		return regex_matchhere(regexp+1, text);
-	do {    /* must look even if string is empty */
-		if (regex_matchhere(regexp, text))
-			return 1;
-	} while (*text++ != '\0');
-	return 0;
-}
-
-/* regex_matchhere: search for regexp at beginning of text */
-int regex_matchhere(char *regexp, char *text)
-{
-	if (regexp[0] == '\0')
-		return 1;
-	if (regexp[1] == '*')
-		return regex_matchstar(regexp[0], regexp+2, text);
-	if (regexp[0] == '$' && regexp[1] == '\0')
-		return *text == '\0';
-	if (*text!='\0' && (regexp[0]=='.' || regexp[0]==*text))
-		return regex_matchhere(regexp+1, text+1);
-	return 0;
-}
-
-/* regex_matchstar: search for c*regexp at beginning of text */
-int regex_matchstar(int c, char *regexp, char *text)
-{
-	do {    /* a * matches zero or more instances */
-		if (regex_matchhere(regexp, text))
-			return 1;
-	} while (*text != '\0' && (*text++ == c || c == '.'));
-	return 0;
-}
-
-/* ltrim : removes whitespace on the "left" (start) of the string */
-char *ltrim(char *s)
-{
-	while (isspace(*s))
-		s++;
-
-	return s;
-}
-
-/* rtrim : removes whitespace on the "right" (end) of the string */
-char *rtrim(char *s)
-{
-	char *e;
-
-	for (e = s + strlen(s) - 1; isspace(*e); e--)
-		*e = 0;
-
-	return s;
-}
-
-/* c_resize : resizes the ptr, should length and capacity be the same */
-void c_resize(void *ptr, size_t *len, size_t *cap, size_t bytes)
-{
-	void **p;
-
-	if (*len == *cap) {
-		if (*cap) {
-			*cap *= 2;
-		} else {
-			*cap = BUFSMALL;
-		}
-		p = (void **)ptr;
-		*p = realloc(*p, bytes * *cap);
-
-		// set the rest of the elements to zero
-#if 0
-		u8 *b;
-		size_t i;
-		for (b = ((u8 *)*p) + *len * bytes, i = *len; i < *cap; b += bytes, i++) {
-			memset(b, 0, bytes);
-		}
-#else
-		memset(((u8 *)*p) + *len * bytes, 0, (*cap - *len) * bytes);
-#endif
-	}
-}
-
-/* sys_readfile : reads an entire file into a memory buffer */
-char *sys_readfile(char *path)
-{
-	FILE *fp;
-	s64 size;
-	char *buf;
-
-	fp = fopen(path, "rb");
-	if (!fp) {
-		return NULL;
-	}
-
-	// get the file's size
-	fseek(fp, 0, SEEK_END);
-	size = ftell(fp);
-	fseek(fp, 0, SEEK_SET);
-
-	buf = malloc(size + 1);
-	memset(buf, 0, size + 1);
-
-	fread(buf, 1, size, fp);
-	fclose(fp);
-
-	return buf;
-}
-
 /* m_lblend_u8 : linear blend on u8s */
 u8 m_lblend_u8(u8 a, u8 b, f32 t)
 {
 	return (u8)((a + t * (b - a)) + 0.5f);
-}
-
-/* streq : return true if strings are equivalent */
-int streq(char *s, char *t)
-{
-	return s && t && strcmp(s, t) == 0;
 }
 
