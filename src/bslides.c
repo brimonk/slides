@@ -97,8 +97,11 @@ struct image_t {
 	char *name;
 };
 
-struct string_t {
-	char *text;
+struct rect_t {
+	s32 x;
+	s32 y;
+	s32 w;
+	s32 h;
 };
 
 enum {
@@ -109,8 +112,17 @@ enum {
 	, SLIDEJUST_TOTAL
 };
 
+enum {
+	  FRAMEBUFFER_FINAL
+	, FRAMEBUFFER_BACKGROUND
+	, FRAMEBUFFER_IMAGES
+	, FRAMEBUFFER_TEXT
+	, FRAMEBUFFER_TOTAL
+};
+
 struct fchar_t {
-	u8 *bitmap;
+	struct pixel_t *bitmap;
+	// u8 *bitmap;
 	u32 codepoint;
 	u32 fontsize;
 	s32 f_x; // font size (in pixels)
@@ -166,10 +178,7 @@ struct function_t {
 
 struct show_t {
 
-	// output members
-	struct pixel_t *fbuffer; // holds the combined bg + fg
-	struct pixel_t *fbuffer_bg;
-	struct pixel_t *fbuffer_fg;
+	struct pixel_t *framebuffers[FRAMEBUFFER_TOTAL];
 
 	// TODO input members
 
@@ -205,8 +214,6 @@ int show_free(struct show_t *show);
 // Slideshow Rendering Functions
 /* show_render : renders the slide 'idx' into its internal buffer */
 int show_render(struct show_t *show, s32 idx);
-/* show_renderchar : renders a single s32 codepoint to x,y position */
-int show_renderchar(struct show_t *show, struct fchar_t *fchar, color_t color, s32 x, s32 y);
 /* show_renderimage : renders the image to the slide */
 int show_renderimage(struct show_t *slide, struct image_t *image, s32 x, s32 y);
 
@@ -242,6 +249,9 @@ int func_imageadd(struct show_t *show, int argc, char **argv);
 /* func_imagedraw : user function ; draws the image in an argument dependent way */
 int func_imagedraw(struct show_t *show, int argc, char **argv);
 
+/* draw_rect : blits a rectangle */
+int draw_rect(struct pixel_t *dst, struct pixel_t *src, struct rect_t dstdim, struct rect_t srcdim, struct rect_t dstrect, struct rect_t srcrect);
+
 // Utility Functions
 /* util_framebuffer : (re)sets the show's internal framebuffer */
 int util_framebuffer(struct show_t *show);
@@ -251,6 +261,8 @@ int util_setdefaults(struct show_t *show);
 int util_slidecount(struct show_t *show);
 /* util_getfuncidx : gets the function index */
 int util_getfuncidx(struct show_t *show, char *function);
+/* util_rect : utility function to fill out a rectangle */
+struct rect_t util_rect(s32 x, s32 y, s32 w, s32 h);
 
 // Font Functions
 /* font_load : sets up an entry in the font table with these params */
@@ -336,10 +348,10 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		// rc = stbi_write_png(imagename, show.settings.img_w, show.settings.img_h,
-		// 		sizeof(struct pixel_t), show.fbuffer, sizeof(struct pixel_t) * show.settings.img_w);
 		rc = stbi_write_png(imagename, show.settings.img_w, show.settings.img_h,
-			sizeof(struct pixel_t), show.fbuffer_bg, sizeof(struct pixel_t) * show.settings.img_w);
+				sizeof(struct pixel_t), show.framebuffers[FRAMEBUFFER_FINAL],
+				sizeof(struct pixel_t) * show.settings.img_w);
+
 		if (!rc) {
 			fprintf(stderr, "Couldn't write %s!\n", imagename);
 			exit(1);
@@ -440,8 +452,8 @@ int show_render(struct show_t *show, s32 idx)
 	s32 i, slide;
 	s32 j;
 	s32 rc;
-	color_t fg, bg;
-	color_t outcolor;
+	struct rect_t dstdim, dstrect;
+	struct rect_t srcdim, srcrect;
 
 	// NOTE (brian) runs commands from `newslide` to `newslide`, combines framebuffers, then returns
 
@@ -470,22 +482,18 @@ int show_render(struct show_t *show, s32 idx)
 		}
 	}
 
-	for (i = 0; i < show->settings.img_w; i++) {
-		for (j = 0; j < show->settings.img_h; j++) {
-			// idx = i * show->settings.img_h + j;
-			idx = i + j * show->settings.img_w;
+	dstdim = util_rect(0, 0, show->settings.img_w, show->settings.img_h);
+	srcdim = util_rect(0, 0, show->settings.img_w, show->settings.img_h);
+	dstrect = dstdim;
+	srcrect = srcdim;
 
-			fg = *(struct color_t *)&show->fbuffer_fg[idx];
-			bg = *(struct color_t *)&show->fbuffer_bg[idx];
-
-			outcolor.r = m_lblend_u8(fg.r, bg.r, fg.a);
-			outcolor.g = m_lblend_u8(fg.g, bg.g, fg.a);
-			outcolor.b = m_lblend_u8(fg.b, bg.b, fg.a);
-			outcolor.a = 0xff;
-
-			show->fbuffer[idx] = *(struct pixel_t *)&outcolor;
-		}
+	// mix all of the framebuffers, one at a time, onto the FINAL framebuffer
+	for (i = 1; i < ARRSIZE(show->framebuffers); i++) {
+		draw_rect(show->framebuffers[0], show->framebuffers[i], dstdim, srcdim, dstrect, srcrect);
 	}
+
+	return 0;
+}
 
 #if 0 // legacy
 	// then we draw text over it, no text under slides
@@ -504,8 +512,7 @@ int show_render(struct show_t *show, s32 idx)
 	}
 #endif
 
-	return 0;
-}
+#if 0
 
 /* show_renderimage : renders the image to the slide */
 int show_renderimage(struct show_t *show, struct image_t *image, s32 x, s32 y)
@@ -587,6 +594,8 @@ int show_renderimage(struct show_t *show, struct image_t *image, s32 x, s32 y)
 	return 0;
 }
 
+#endif
+
 /* m_lblend_u8 : linear blend on u8s */
 u8 m_lblend_u8(u8 a, u8 b, f32 t)
 {
@@ -637,24 +646,19 @@ int func_blank(struct show_t *show, int argc, char **argv)
 /* func_clear : user function ; clears framebuffers */
 int func_clear(struct show_t *show, int argc, char **argv)
 {
-	struct pixel_t bg, fg, nil;
-	s32 i, j;
-	s32 idx;
+	s32 bytes;
+	s32 i;
 
 	assert(show);
 
-	bg = *(struct pixel_t *)&show->templates[show->settings.template].bg;
-	fg = *(struct pixel_t *)&show->templates[show->settings.template].fg;
-	memset(&nil, 0, sizeof nil);
+	bytes = show->settings.img_w * show->settings.img_h;
 
-	for (j = 0; j < show->settings.img_h; j++) {
-		for (i = 0; i < show->settings.img_w; i++) {
-			idx = i + j * show->settings.img_w;
-			show->fbuffer_bg[idx] = bg;
-			show->fbuffer_fg[idx] = fg;
-			show->fbuffer[idx] = nil;
-		}
+	for (i = 0; i < ARRSIZE(show->framebuffers); i++) {
+		memset(show->framebuffers[i], 0, bytes);
 	}
+
+	show->settings.pos_x = 60;
+	show->settings.pos_y = 60;
 
 	return 0;
 }
@@ -703,6 +707,7 @@ int func_templateadd(struct show_t *show, int argc, char **argv)
 /* func_templateset : user function ; sets the current template */
 int func_templateset(struct show_t *show, int argc, char **argv)
 {
+	struct color_t bg;
 	s32 i;
 
 	assert(show);
@@ -710,11 +715,20 @@ int func_templateset(struct show_t *show, int argc, char **argv)
 	for (i = 0; i < show->templates_len; i++) {
 		if (streq(show->templates[i].name, argv[1])) {
 			show->settings.template = i;
-			return 0;
+			bg = show->templates[show->settings.template].bg;
+			break;
 		}
 	}
 
-	return -1;
+	if (i == show->templates_len) {
+		return -1;
+	}
+
+	for (i = 0; i < show->settings.img_w * show->settings.img_h; i++) {
+		show->framebuffers[FRAMEBUFFER_BACKGROUND][i] = *(struct pixel_t *)&bg;
+	}
+
+	return 0;
 }
 
 /* func_printdate : user function ; prints the date at the current line */
@@ -730,6 +744,8 @@ int func_printline(struct show_t *show, int argc, char **argv)
 	struct font_t *font;
 	struct fchar_t *fchar;
 	char buf[BUFLARGE];
+	struct rect_t dstdim, dstrect;
+	struct rect_t srcdim, srcrect;
 
 	// NOTE (brian): string join on spaces, then print from 0 to len
 
@@ -746,19 +762,29 @@ int func_printline(struct show_t *show, int argc, char **argv)
 			snprintf(buf + strlen(buf), sizeof buf - strlen(buf), "%s", " ");
 	}
 
-	for (i = 0; i < strlen(buf); i++) {
-		fchar = font_getcodepoint(font, buf[i], show->settings.fontsize);
+	dstdim = util_rect(0, 0, show->settings.img_w, show->settings.img_h);
 
-		draw_rect(show->fbuffer_fg,
-				  fchar->bitmap, // src buf
-				  show->settings.img_w,
-				  show->settings.img_h,
-				  fchar->f_x, // src w
-				  fchar->f_y, // src h
-				  show->settings.pos_x + fchar->b_x,
-				  show->settings.pos_y + fchar->b_y
-				  );
+	for (i = 0; i < strlen(buf); i++) {
+
+		if (buf[i] != ' ') {
+			fchar = font_getcodepoint(font, buf[i], show->settings.fontsize);
+
+			srcdim  = util_rect(0, 0, fchar->f_x, fchar->f_y);
+			srcrect = srcdim;
+
+			dstrect = util_rect(show->settings.pos_x + fchar->b_x, show->settings.pos_y + fchar->b_y,
+					fchar->f_x, fchar->f_y);
+
+			draw_rect(show->framebuffers[FRAMEBUFFER_TEXT], fchar->bitmap, dstdim, srcdim, dstrect, srcrect);
+
+			show->settings.pos_x += fchar->advance;
+		} else {
+			show->settings.pos_x += 18; // TODO determine how far we should move on space!!
+		}
 	}
+
+	show->settings.pos_x = 0;
+	show->settings.pos_y += font_vertadvance(font);
 
 	return 0;
 }
@@ -883,19 +909,17 @@ int func_nop(struct show_t *show, int argc, char **argv)
 /* util_framebuffer : (re)sets the show's internal framebuffer */
 int util_framebuffer(struct show_t *show)
 {
+	s32 i;
 	s32 pixels;
 
 	assert(show);
 
-	free(show->fbuffer);
-	free(show->fbuffer_fg);
-	free(show->fbuffer_bg);
-
 	pixels = show->settings.img_w * show->settings.img_h;
 
-	show->fbuffer    = calloc(pixels, sizeof(struct pixel_t));
-	show->fbuffer_bg = calloc(pixels, sizeof(struct pixel_t));
-	show->fbuffer_fg = calloc(pixels, sizeof(struct pixel_t));
+	for (i = 0; i < ARRSIZE(show->framebuffers); i++) {
+		free(show->framebuffers[i]);
+		show->framebuffers[i] = calloc(pixels, sizeof(struct pixel_t));
+	}
 
 	return 0;
 }
@@ -973,41 +997,69 @@ struct color_t util_parsecolor(char *s)
 	return color;
 }
 
+/* util_rect : utility function to fill out a rectangle */
+struct rect_t util_rect(s32 x, s32 y, s32 w, s32 h)
+{
+	struct rect_t r;
+
+	r.x = x;
+	r.y = y;
+	r.w = w;
+	r.h = h;
+
+	return r;
+}
+
 //
 // Framebuffer Functions
 //
 
 /* draw_rect : blits a rectangle */
-int draw_rect(struct pixel_t *dst, struct pixel_t *src, s32 dst_w, s32 dst_h,
-		s32 src_w, s32 src_h, s32 pos_x, s32 pos_y)
+int draw_rect(struct pixel_t *dst, struct pixel_t *src, struct rect_t dstdim, struct rect_t srcdim, struct rect_t dstrect, struct rect_t srcrect)
 {
+	s32 x, y;
 	s32 src_x, src_y;
 	s32 dst_x, dst_y;
 	s32 src_idx, dst_idx;
 	struct pixel_t dst_pix, src_pix;
 
-	// NOTE (brian): draws a rectangle on top of another. iterates over the source pixels, picks the
-	// place in the output, performs linear blending, and puts into the output framebuffer.
+	// NOTE (brian): this function assumes that you've already done the work to scale the src to the
+	// destination's dimensions.
 
-	for (src_x = 0; src_x < src_w; src_x++) {
-		for (src_y = 0; src_y < src_h; src_y++) {
+	assert(dstdim.x == 0);
+	assert(dstdim.y == 0);
+	assert(srcdim.x == 0);
+	assert(srcdim.y == 0);
 
-			dst_x = pos_x + src_x;
-			dst_y = pos_y + src_y;
+	for (x = srcrect.x; x < srcrect.w; x++) {
+		for (y = srcrect.y; y < srcrect.h; y++) {
+			src_x = x;
+			src_y = y;
+			dst_x = dstrect.x + x;
+			dst_y = dstrect.y + y;
 
-			// check for errors first, then determine indexes
-			if (dst_x < 0 || dst_x > dst_w) {
+			// check for errors (src)
+			if (src_x < srcdim.x || src_x > srcdim.w) {
 				continue;
 			}
 
-			if (dst_y < 0 || dst_y > dst_h) {
+			if (src_y < srcdim.y || src_y > srcdim.h) {
 				continue;
 			}
 
-			src_idx = src_x + src_y * src_w;
+			// check for errors (dst)
+			if (dst_x < dstdim.x || dst_x > dstdim.w) {
+				continue;
+			}
+
+			if (dst_y < dstdim.y || dst_y > dstdim.h) {
+				continue;
+			}
+
+			src_idx = src_x + src_y * srcdim.w;
 			src_pix = src[src_idx];
 
-			dst_idx = dst_x + dst_y * dst_w;
+			dst_idx = dst_x + dst_y * dstdim.w;
 			dst_pix = dst[dst_idx];
 
 			dst_pix.r = m_lblend_u8(dst_pix.r, src_pix.r, src_pix.a);
@@ -1084,21 +1136,27 @@ struct fchar_t *font_getcodepoint(struct font_t *font, u32 codepoint, u32 fontsi
 		font->metricsread = true;
 	}
 
-	struct pixels_t *rgba_bitmap;
+	struct pixel_t *rgba_bitmap;
+
+	rgba_bitmap = calloc(w * h, sizeof(struct pixel_t));
+
+	assert(rgba_bitmap);
 
 	for (i = 0; i < w * h; i++) {
+		rgba_bitmap[i].r = 0xff;
+		rgba_bitmap[i].g = 0xff;
+		rgba_bitmap[i].b = 0xff;
+		rgba_bitmap[i].a = alpha_bitmap[i];
 	}
 
-	font->ftab[font->ftab_len].bitmap  = bitmap;
+	font->ftab[font->ftab_len].bitmap  = rgba_bitmap;
 	font->ftab[font->ftab_len].f_x     = w;
 	font->ftab[font->ftab_len].f_y     = h;
 	font->ftab[font->ftab_len].b_x     = xoff;
 	font->ftab[font->ftab_len].b_y     = yoff;
 	font->ftab[font->ftab_len].advance = advance * scale_x;
 
-	font->ftab_len++;
-
-	return font->ftab + i;
+	return font->ftab + font->ftab_len++;
 }
 
 /* font_vertadvance : returns the font's vertical advance */
