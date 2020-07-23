@@ -9,22 +9,40 @@
  * 3. Convert rendering into a programmable function situation
  * 4. Create a DLL loader, and read exported functions as viable candidate. Use the real name of the
  *    function as the name in the slideshow file to use
+ * 5. String parser, quoted strings come through as a single string, etc.
+ *
+ * DOCUMENTATION
+ *
+ *   This is my slideshow program. Basically, PowerPoint is bad, and just making a PDF from some
+ * markup system didn't create the kinds of interactive / animative presentations that really seem
+ * to capture audiences. So, here we are.
+ *
+ *   This is modeled after Jon Blow's slideshow program, where he basically took his 3d game engine,
+ * and just made it render text, images, and whatever from a description file. Mine's a little
+ * different:
+ *
+ * - command driven
+ * - defers asset loading, keeping everything loaded until close
+ * - user hotloadable modules (library)
  *
  * COMMANDS (Completed)
  *
  * COMMANDS (Incompleted)
- *   newslide
- *   printline
  *   blank
- *   image
+ *   getdate
  *   font
  *   fontset
  *   fontsize
+ *   image
+ *   justified
  *   maketemplate
+ *   newslide
+ *   printline
  *   templateset
  *   usetemplate
- *   justified
- *   defer
+ *   libopen
+ *   libexec
+ *   libclose
  *
  * BUGS
  * - using a font that isn't aliased crashes the program
@@ -58,7 +76,7 @@
 #define DEFAULT_FONT_SIZE  (32)
 #define MAX_LINES_ON_SLIDE (32)
 
-#define MAX_FUNCTIONS (64)
+#define MAX_FUNCTIONS (BUFSMALL)
 
 struct pixel_t {
 	u8 r, g, b, a;
@@ -81,13 +99,6 @@ struct image_t {
 
 struct string_t {
 	char *text;
-};
-
-enum {
-	  DIRECT_NONE
-	, DIRECT_TEXT
-	, DIRECT_JUSTIFICATION
-	, DIRECT_TOTAL
 };
 
 enum {
@@ -127,27 +138,20 @@ struct command_t {
 	char **argv;
 };
 
-struct slide_t {
-	struct image_t *images;
-	size_t images_len, images_cap;
-	size_t image_curr;
-	struct string_t *strings;
-	size_t strings_len, strings_cap;
-	size_t string_curr;
-	char *fontname;
-	s32 fontsize;
-};
-
 struct template_t {
-	char *id;
+	char *name;
 	s32 justification;
-	color_t fg, bg;
+	color_t fg;
+	color_t bg;
 };
 
 struct settings_t {
+	s32 fontidx;
 	s32 fontsize;
-	char *fontname;
+	s32 template;
 	s32 slide;
+	s32 pos_x, pos_y;
+	s32 img_w, img_h;
 };
 
 struct show_t;
@@ -156,27 +160,40 @@ typedef int (showfunc_t) (struct show_t *, int, char **);
 
 struct function_t {
 	char *name;
+	s32 run_once;
 	showfunc_t *func;
 };
 
 struct show_t {
-	struct pixel_t *fbuffer_bg, *fbuffer_fg;
-	struct pixel_t *pixels;
-	s32 img_w, img_h; // misleading - w and h of the output framebuffer
-	struct slide_t *slides;
-	size_t slides_len, slides_cap;
-	struct template_t *templates;
-	size_t templates_len, templates_cap;
-	struct function_t functions[MAX_FUNCTIONS];
-	size_t functions_len;
-	struct font_t *fonts;
-	size_t fonts_len, fonts_cap;
-	char *name;
-	char *fontname;
-	u32 fontsize;
-	struct color_t bg, fg;
+
+	// output members
+	struct pixel_t *fbuffer; // holds the combined bg + fg
+	struct pixel_t *fbuffer_bg;
+	struct pixel_t *fbuffer_fg;
+
+	// TODO input members
+
+	// settings
 	struct settings_t defaults;
 	struct settings_t settings;
+
+	// templates
+	struct template_t *templates;
+	size_t templates_len, templates_cap;
+
+	// function table
+	struct function_t functions[MAX_FUNCTIONS];
+	size_t functions_len;
+
+	// command strings
+	struct command_t *commands;
+	size_t commands_len, commands_cap;
+
+	// font table
+	struct font_t *fonts;
+	size_t fonts_len, fonts_cap;
+
+	char *name;
 };
 
 // Slideshow Init & Free Functions
@@ -187,42 +204,77 @@ int show_free(struct show_t *show);
 
 // Slideshow Rendering Functions
 /* show_render : renders the slide 'idx' into its internal buffer */
-int show_render(struct show_t *show, size_t idx);
+int show_render(struct show_t *show, s32 idx);
 /* show_renderchar : renders a single s32 codepoint to x,y position */
 int show_renderchar(struct show_t *show, struct fchar_t *fchar, color_t color, s32 x, s32 y);
 /* show_renderimage : renders the image to the slide */
 int show_renderimage(struct show_t *slide, struct image_t *image, s32 x, s32 y);
 
+// User Callable (Default) Slideshow Functions
+/* functab_add : adds a callable function into the show */
+int functab_add(struct show_t *show, char *name, s32 run_once, showfunc_t func);
+/* func_name : user function ; sets the slideshow name, to be run once */
+int func_name(struct show_t *show, int argc, char **argv);
+/* func_blank : user function ; inserts a blank line at the current cursor position */
+int func_blank(struct show_t *show, int argc, char **argv);
+/* func_clear : user function ; clears the framebuffer */
+int func_clear(struct show_t *show, int argc, char **argv);
+/* func_templateadd : user function ; adds / overwrites a template */
+int func_templateadd(struct show_t *show, int argc, char **argv);
+/* func_templateset : user function ; sets the current template */
+int func_templateset(struct show_t *show, int argc, char **argv);
+/* func_dimensions : user function ; sets the output width / height */
+int func_dimensions(struct show_t *show, int argc, char **argv);
+/* func_nop : user(ish) function ; does nothing, but show an error */
+int func_nop(struct show_t *show, int argc, char **argv);
+/* func_printdate : user function ; prints the date at the current line */
+int func_printdate(struct show_t *show, int argc, char **argv);
+/* func_printline : user function ; basically, echo */
+int func_printline(struct show_t *show, int argc, char **argv);
+/* func_fontadd : user function ; loads a font, to be run once */
+int func_fontadd(struct show_t *show, int argc, char **argv);
+/* func_fontset : user function ; sets the font */
+int func_fontset(struct show_t *show, int argc, char **argv);
+/* func_fontsizeset : user function ; sets the font size */
+int func_fontsizeset(struct show_t *show, int argc, char **argv);
+/* func_imageadd : user function ; loads an image, to be run once */
+int func_imageadd(struct show_t *show, int argc, char **argv);
+/* func_imagedraw : user function ; draws the image in an argument dependent way */
+int func_imagedraw(struct show_t *show, int argc, char **argv);
+
+// Utility Functions
+/* util_framebuffer : (re)sets the show's internal framebuffer */
+int util_framebuffer(struct show_t *show);
+/* util_setdefaults : sets default settings */
+int util_setdefaults(struct show_t *show);
+/* util_slidecount : counts the number of slides in the slideshow */
+int util_slidecount(struct show_t *show);
+/* util_getfuncidx : gets the function index */
+int util_getfuncidx(struct show_t *show, char *function);
+
 // Font Functions
-/* f_load : sets up an entry in the font table with these params */
-s32 f_load(struct show_t *show, char *path, char *name);
-/* f_getfont : returns a pointer to the font structure with the matching name */
-struct font_t *f_getfont(struct show_t *show, char *name);
-/* f_getcodepoint : retrieves the fchar_t from input font and codepoint */
-struct fchar_t *f_getcodepoint(struct show_t *show, char *name, u32 codepoint, u32 fontsize);
-/* f_free : frees all fonts associated with the slideshow */
-s32 f_free(struct show_t *show);
-/* f_vertadvance : returns the font's vertical advance */
-s32 f_vertadvance(struct font_t *font);
+/* font_load : sets up an entry in the font table with these params */
+s32 font_load(struct font_t *font, char *name, char *path);
+/* font_getfont : returns a pointer to the font structure with the matching name */
+struct font_t *font_getfont(struct show_t *show, char *name);
+/* font_getcodepoint : retrieves the fchar_t from input font and codepoint */
+struct fchar_t *font_getcodepoint(struct font_t *font, u32 codepoint, u32 fontsize);
+/* font_free : frees all fonts associated with the slideshow */
+s32 font_free(struct show_t *show);
+/* font_vertadvance : returns the font's vertical advance */
+s32 font_vertadvance(struct font_t *font);
 
-/* show_setbg : sets the background (will draw over everything else) */
-int show_setbg(struct show_t *show, color_t color);
 
-/* s_getfontname : returns the font name, using the show's as a default */
-char *s_getfontname(struct show_t *show, struct slide_t *slide);
-/* s_getfontsize : returns the font name, using the show's as a default */
-s32 s_getfontsize(struct show_t *show, struct slide_t *slide);
-
-/* parse_color : parses a color string into a color structure */
-struct color_t parse_color(char *s);
+/* util_parsecolor : parses a color string into a color structure */
+struct color_t util_parsecolor(char *s);
 
 /* m_lblend_u8 : linear blend on u8s */
 u8 m_lblend_u8(u8 a, u8 b, f32 t);
 
 int main(int argc, char **argv)
 {
-	struct show_t slideshow;
-	size_t i;
+	struct show_t show;
+	s32 i, len;
 	int rc;
 	char slidename[BUFSMALL];
 	char imagename[BUFSMALL];
@@ -235,60 +287,70 @@ int main(int argc, char **argv)
 	memset(slidename, 0, sizeof slidename);
 	memset(imagename, 0, sizeof imagename);
 
-	rc = show_load(&slideshow, argv[1]);
+	rc = show_load(&show, argv[1]);
 	if (rc < 0) {
-		fprintf(stderr, "Couldn't load up the slideshow!\n");
+		fprintf(stderr, "Couldn't load up the show!\n");
 		exit(1);
 	}
 
 	// hook up the default functions
-	functab_add(&slideshow, "blank", func_blank);
+	functab_add(&show, "blank",        0, func_blank);
+	functab_add(&show, "name",         1, func_name);
+	functab_add(&show, "clear",        0, func_clear);
+	functab_add(&show, "newslide",     0, func_nop);
+	functab_add(&show, "templateadd",  1, func_templateadd);
+	functab_add(&show, "templateset",  0, func_templateset);
+	functab_add(&show, "dimensions",   1, func_dimensions);
+	functab_add(&show, "printline",    0, func_printline);
+	functab_add(&show, "printdate",    0, func_printdate);
+	functab_add(&show, "fontadd",      1, func_fontadd);
+	functab_add(&show, "fontset",      0, func_fontset);
+	functab_add(&show, "fontsizeset",  0, func_fontsizeset);
+	functab_add(&show, "imageadd",     1, func_imageadd);
+	functab_add(&show, "imagedraw",    0, func_imagedraw);
 
-	// print out all of the slideshow images
-	for (i = 0; i < slideshow.slides_len; i++) {
-		snprintf(slidename, sizeof slidename, "%s_%04ld", slideshow.name, (long)i);
+	// exec all of the default functions
+	for (i = 0; i < show.commands_len; i++) {
+		s32 idx = util_getfuncidx(&show, show.commands[i].argv[0]);
+		if (idx < 0) {
+			ERR("Couldn't find function '%s'\n", show.commands[i].argv[0]);
+			continue;
+		}
+		if (show.functions[idx].run_once) {
+			rc = show.functions[idx].func(&show, show.commands[i].argc, show.commands[i].argv);
+		}
+	}
+
+	// setup the show's framebuffers and whatnot
+	util_framebuffer(&show);
+
+	for (i = 0, len = util_slidecount(&show); i < len; i++) {
+		snprintf(slidename, sizeof slidename, "%s_%04d", show.name, i);
 		snprintf(imagename, sizeof imagename, "%s.png", slidename);
 
 		printf("%s\n", imagename);
 
-		rc = show_render(&slideshow, i);
+		rc = show_render(&show, i);
 		if (rc < 0) {
 			fprintf(stderr, "Couldn't render '%s' to the image!\n", slidename);
 			exit(1);
 		}
 
-		rc = stbi_write_png(imagename, slideshow.img_w, slideshow.img_h, sizeof(struct pixel_t), slideshow.pixels, sizeof(struct pixel_t) * slideshow.img_w);
+		// rc = stbi_write_png(imagename, show.settings.img_w, show.settings.img_h,
+		// 		sizeof(struct pixel_t), show.fbuffer, sizeof(struct pixel_t) * show.settings.img_w);
+		rc = stbi_write_png(imagename, show.settings.img_w, show.settings.img_h,
+			sizeof(struct pixel_t), show.fbuffer_bg, sizeof(struct pixel_t) * show.settings.img_w);
 		if (!rc) {
 			fprintf(stderr, "Couldn't write %s!\n", imagename);
 			exit(1);
 		}
 	}
 
-	rc = show_free(&slideshow);
+	rc = show_free(&show);
 	if (rc < 0) {
-		fprintf(stderr, "Couldn't free the slideshow!\n");
+		fprintf(stderr, "Couldn't free the show!\n");
 		exit(1);
 	}
-
-	return 0;
-}
-
-/* func_blank : implements the "blank" function */
-int func_blank(struct show_t *show, int argc, char **argv)
-{
-	assert(show);
-
-	return 0;
-}
-
-/* functab_add : adds a callable function into the show */
-int functab_add(struct show_t *show, char *name, showfunc_t func)
-{
-	assert(show);
-	assert(show->functions_len < MAX_FUNCTIONS);
-
-	show->functions[show->functions_len++].name = strdup(name);
-	show->functions[show->functions_len++].func = func;
 
 	return 0;
 }
@@ -297,30 +359,24 @@ int functab_add(struct show_t *show, char *name, showfunc_t func)
 int show_load(struct show_t *show, char *config)
 {
 	FILE *fp;
-	char *s, *t;
-	struct slide_t *slide;
-	struct image_t *image;
+	char *s;
+	s32 i;
+	s32 argc;
 	s32 len;
-	int rc, i;
 	char *tokens[BUFSMALL];
+	char **argv;
 	char buf[BUFLARGE];
 
 	// TODO
 	// this would probably be better with tokenized strings
 
 	memset(show, 0, sizeof(*show));
-	memset(tokens, 0, sizeof tokens);
 
 	fp = fopen(config, "r");
 
 	if (!fp) {
 		return -1;
 	}
-
-	// set some default parameters
-	show->fontsize = DEFAULT_FONT_SIZE;
-	show->img_w = DEFAULT_WIDTH;
-	show->img_h = DEFAULT_HEIGHT;
 
 	while (buf == fgets(buf, sizeof buf, fp)) {
 		// trim the string to remove whitespace
@@ -332,7 +388,7 @@ int show_load(struct show_t *show, char *config)
 			continue;
 		}
 
-		t = strdup(buf);
+		memset(tokens, 0, sizeof tokens);
 
 		for (i = 0, s = strtok(buf, " "); i < ARRSIZE(tokens) && s; i++, s = strtok(NULL, " ")) {
 			tokens[i] = s;
@@ -342,94 +398,31 @@ int show_load(struct show_t *show, char *config)
 			continue;
 		}
 
-		if (streq(":", tokens[0])) { // parse a command/directive
-
-			if (streq("newslide", tokens[1])) {
-				if (show->slides_cap != 0) {
-					show->slides_len++;
-				}
-
-				c_resize(&show->slides, &show->slides_len, &show->slides_cap, sizeof(struct slide_t));
-				slide = show->slides + show->slides_len;
-				c_resize(&slide->strings, &slide->strings_len, &slide->strings_cap, sizeof(*slide->strings));
-
-			} else if (streq("font", tokens[1])) {
-				rc = f_load(show, tokens[3], tokens[2]);
-				if (rc < 0) {
-					fprintf(stderr, "Couldn't load the font!\n");
-					return -1;
-				}
-
-			} else if (streq("name", tokens[1])) {
-				show->name = strdup(tokens[2]);
-
-			} else if (streq("color", tokens[1])) {
-				struct color_t *colorptr;
-
-				if (streq("bg", tokens[2])) {
-					colorptr = &show->bg;
-				} else if (streq("fg", tokens[2])) {
-					colorptr = &show->fg;
-				} else {
-					fprintf(stderr, "Unrecognized Color Type'%s'\n", tokens[2]);
-				}
-
-				*colorptr = parse_color(tokens[3]);
-
-			} else if (streq("fontsize", tokens[1])) {
-				if (show->slides_len) {
-					slide->fontsize = atoi(tokens[2]);
-				} else {
-					show->fontsize = atoi(tokens[2]);
-				}
-
-
-			} else if (streq("fontname", tokens[1])) {
-				if (show->slides_len) {
-					if (slide->fontname)
-						free(slide->fontname);
-					slide->fontname = strdup(tokens[2]);
-				} else {
-					show->fontname = strdup(tokens[2]);
-				}
-
-			} else if (streq("image", tokens[1])) { // attempt to load the image
-				slide = show->slides + show->slides_len;
-
-				c_resize(&slide->images, &slide->images_len, &slide->images_cap, sizeof(struct image_t));
-				image = slide->images + slide->images_len++;
-
-				image->pixels = (struct pixel_t *)stbi_load(tokens[2], &image->img_w, &image->img_h, NULL, 4);
-				if (!image->pixels) {
-					fprintf(stderr, "Couldn't load image file '%s'\n", tokens[2]);
-					return -1;
-				}
-				image->name = strdup(tokens[2]);
-
-			} else if (streq("imagesize", tokens[1])) {
-				show->img_w = atoi(tokens[2]);
-				show->img_h = atoi(tokens[3]);
-
-			} else if (streq("blank", tokens[1])) {
-				slide = show->slides + show->slides_len;
-				slide->strings_len++;
+		if (!streq(":", tokens[0])) {
+			for (i = len - 1; i > -1; i--) {
+				tokens[i + 1] = tokens[i];
 			}
-
-			free(t);
-
-		} else { // copy a line of text into the slideshow text buffer
-			slide = show->slides + show->slides_len;
-			assert(slide->strings_len != MAX_LINES_ON_SLIDE);
-			slide->strings[slide->strings_len++].text = t;
+			tokens[0] = "printline";
+			argv = tokens;
+		} else {
+			argv = tokens + 1;
 		}
 
+		for (argc = 0; argv[argc]; argc++)
+			;
+
+		C_RESIZE(&show->commands, &show->commands, sizeof(*show->commands));
+
+		show->commands[show->commands_len].argc = argc;
+		show->commands[show->commands_len].argv = calloc(argc, sizeof(char *));
+		for (i = 0; i < argc; i++) {
+			show->commands[show->commands_len].argv[i] = strdup(argv[i]);
+		}
+
+		show->commands_len++;
 	}
 
 	fclose(fp);
-
-	// final setup
-	show->slides_len++;
-	show->pixels = calloc(show->img_w * show->img_h, sizeof(struct pixel_t));
 
 	return 0;
 }
@@ -437,76 +430,67 @@ int show_load(struct show_t *show, char *config)
 /* show_free : frees everything related to the slideshow */
 int show_free(struct show_t *show)
 {
-	size_t i, j;
-
-	if (!show)
-		return -1;
-
-	for (i = 0; i < show->slides_len; i++) {
-		for (j = 0; j < show->slides[i].strings_len; j++) {
-			free(show->slides[i].strings[j].text);
-		}
-		for (j = 0; j < show->slides[i].images_len; j++) {
-			free(show->slides[i].images[j].pixels);
-			free(show->slides[i].images[j].name);
-		}
-		free(show->slides[i].images);
-		free(show->slides[i].strings);
-	}
-
-	for (i = 0; i < show->fonts_len; i++) {
-		for (j = 0; j < show->fonts[i].ftab_len; j++) {
-			free(show->fonts[i].ftab[j].bitmap);
-		}
-		free(show->fonts[i].ftab);
-	}
-	free(show->fonts);
-
-	free(show->pixels);
-
-	free(show->name);
-	free(show->slides);
-
 	return 0;
 }
 
 /* show_render : renders the slide 'idx' into its internal buffer */
-int show_render(struct show_t *show, size_t idx)
+int show_render(struct show_t *show, s32 idx)
 {
-	struct slide_t *slide;
-	struct fchar_t *fchar;
-	s64 i, j;
-	s32 w_xpos, w_ypos;
-	int rc;
+	s32 cmdidx;
+	s32 i, slide;
+	s32 j;
+	s32 rc;
+	color_t fg, bg;
+	color_t outcolor;
 
-	char *fontname;
-	s32 fontsize;
+	// NOTE (brian) runs commands from `newslide` to `newslide`, combines framebuffers, then returns
 
-	// NOTE (brian) for every single slide in the slideshow, we have to
-	// draw every character for every line
-	//
-	// TODO
-	// 1. Handle Justification
-	// 2. Handle out of bounds indexing
+	assert(show);
 
-	slide = show->slides + idx;
-
-	fontname = s_getfontname(show, slide);
-	fontsize = s_getfontsize(show, slide);
-
-	show_setbg(show, show->bg);
-
-	// first, we draw all of our images
-	for (i = 0; i < slide->images_len; i++) {
-		rc = show_renderimage(show, slide->images + i, -1, -1);
+	for (i = 0, slide = -1; i < show->commands_len && slide < idx; i++) {
+		if (streq(show->commands[i].argv[0], "newslide")) {
+			slide++;
+		}
 	}
 
-	// get this figure from image dimensions
-	w_ypos = show->img_h / 12;
+	cmdidx = i;
 
+	for (i = cmdidx; i < show->commands_len && !streq(show->commands[i].argv[0], "newslide"); i++) {
+		j = util_getfuncidx(show, show->commands[i].argv[0]);
+		if (j < 0) {
+			ERR("Function '%s' doesn't exist!\n", show->commands[i].argv[0]);
+			continue;
+		}
+
+		printf("Execing '%s'\n", show->functions[j].name);
+
+		rc = show->functions[j].func(show, show->commands[i].argc, show->commands[i].argv);
+		if (rc < 0) {
+			ERR("Function '%s' returned with an error!\n", show->commands[i].argv[0]);
+		}
+	}
+
+	for (i = 0; i < show->settings.img_w; i++) {
+		for (j = 0; j < show->settings.img_h; j++) {
+			// idx = i * show->settings.img_h + j;
+			idx = i + j * show->settings.img_w;
+
+			fg = *(struct color_t *)&show->fbuffer_fg[idx];
+			bg = *(struct color_t *)&show->fbuffer_bg[idx];
+
+			outcolor.r = m_lblend_u8(fg.r, bg.r, fg.a);
+			outcolor.g = m_lblend_u8(fg.g, bg.g, fg.a);
+			outcolor.b = m_lblend_u8(fg.b, bg.b, fg.a);
+			outcolor.a = 0xff;
+
+			show->fbuffer[idx] = *(struct pixel_t *)&outcolor;
+		}
+	}
+
+#if 0 // legacy
 	// then we draw text over it, no text under slides
 	for (i = 0; i < slide->strings_len; i++) {
-		w_xpos = show->img_w / 12;
+		w_xpos = show->settings.img_w / 12;
 		for (j = 0; slide->strings[i].text && j < strlen(slide->strings[i].text); j++) {
 			if (slide->strings[i].text[j] != ' ') {
 				fchar = f_getcodepoint(show, fontname, slide->strings[i].text[j], fontsize);
@@ -518,48 +502,7 @@ int show_render(struct show_t *show, size_t idx)
 		t = f_vertadvance(f_getfont(show, fontname));
 		w_ypos += t;
 	}
-
-	return 0;
-}
-
-/* show_renderchar : renders a single s32 codepoint to x,y position */
-int show_renderchar(struct show_t *show, struct fchar_t *fchar, color_t color, s32 x, s32 y)
-{
-	s32 i, j, img_idx, fchar_idx;
-	s32 xpos, ypos;
-	struct color_t c;
-	f32 alpha;
-
-	for (i = 0; i < fchar->f_x; i++) {
-		for (j = 0; j < fchar->f_y; j++) {
-
-			// NOTE we only include the x/y offset from the upper left of the
-			// buffer when we go to write into the image buffer. This allows
-			// us to use the same index into the font alpha render as into
-			// the image.
-
-			xpos = (i + x) + fchar->b_x;
-			ypos = (j + y) + fchar->b_y;
-
-			if (xpos < 0 || xpos > show->img_w) {
-				continue;
-			}
-			if (ypos < 0 || ypos > show->img_h) {
-				continue;
-			}
-
-			img_idx = xpos + ypos * show->img_w;
-			fchar_idx = i + j * fchar->f_x;
-
-			alpha = fchar->bitmap[fchar_idx] * 1.0f / 255.0f;
-			memcpy(&c, &show->pixels[img_idx], sizeof c);
-
-			show->pixels[img_idx].r = m_lblend_u8(c.r, color.r, alpha);
-			show->pixels[img_idx].b = m_lblend_u8(c.b, color.b, alpha);
-			show->pixels[img_idx].g = m_lblend_u8(c.g, color.g, alpha);
-			show->pixels[img_idx].a = 0xff;
-		}
-	}
+#endif
 
 	return 0;
 }
@@ -583,8 +526,8 @@ int show_renderimage(struct show_t *show, struct image_t *image, s32 x, s32 y)
 
 	img_w = image->img_w;
 	img_h = image->img_h;
-	win_w = show->img_w;
-	win_h = show->img_h;
+	win_w = show->settings.img_w;
+	win_h = show->settings.img_h;
 
 	scale = 1.0f;
 
@@ -630,12 +573,12 @@ int show_renderimage(struct show_t *show, struct image_t *image, s32 x, s32 y)
 	// now we can put the image onto the canvas
 	for (i = 0; i < bound_w; i++) {
 		for (j = 0; j < bound_h; j++) {
-			dst = (i + bound_x) + (j + bound_y) * show->img_w;
+			dst = (i + bound_x) + (j + bound_y) * show->settings.img_w;
 			src = i + j * bound_w;
-			show->pixels[dst].r = iscaled[src].r;
-			show->pixels[dst].g = iscaled[src].g;
-			show->pixels[dst].b = iscaled[src].b;
-			show->pixels[dst].a = iscaled[src].a;
+			show->fbuffer_fg[dst].r = iscaled[src].r;
+			show->fbuffer_fg[dst].g = iscaled[src].g;
+			show->fbuffer_fg[dst].b = iscaled[src].b;
+			show->fbuffer_fg[dst].a = iscaled[src].a;
 		}
 	}
 
@@ -644,72 +587,466 @@ int show_renderimage(struct show_t *show, struct image_t *image, s32 x, s32 y)
 	return 0;
 }
 
-/* show_setbg : sets the background (will draw over everything else) */
-int show_setbg(struct show_t *show, color_t color)
+/* m_lblend_u8 : linear blend on u8s */
+u8 m_lblend_u8(u8 a, u8 b, f32 t)
 {
-	s32 i, j;
+	return (u8)((a + t * (b - a)) + 0.5f);
+}
 
-	for (j = 0; j < show->img_h; j++) {
-		for (i = 0; i < show->img_w; i++) {
-			show->pixels[i + j * show->img_w].r = color.r;
-			show->pixels[i + j * show->img_w].g = color.g;
-			show->pixels[i + j * show->img_w].b = color.b;
-			show->pixels[i + j * show->img_w].a = 0xff;
+/* functab_add : adds a callable function into the show */
+int functab_add(struct show_t *show, char *name, s32 run_once, showfunc_t func)
+{
+	assert(show);
+	assert(show->functions_len < MAX_FUNCTIONS);
+
+	show->functions[show->functions_len].name = strdup(name);
+	show->functions[show->functions_len].run_once = run_once;
+	show->functions[show->functions_len].func = func;
+
+	show->functions_len++;
+
+	return 0;
+}
+
+//
+// User Callable Functions
+//
+
+/* func_name : user function ; sets the slideshow name, to be run once */
+int func_name(struct show_t *show, int argc, char **argv)
+{
+	assert(show);
+
+	if (argc < 2) {
+		return -1;
+	}
+
+	show->name = strdup(argv[1]);
+
+	return 0;
+}
+
+/* func_blank : user function ; inserts a blank line at the current cursor position */
+int func_blank(struct show_t *show, int argc, char **argv)
+{
+	assert(show);
+
+	return 0;
+}
+
+/* func_clear : user function ; clears framebuffers */
+int func_clear(struct show_t *show, int argc, char **argv)
+{
+	struct pixel_t bg, fg, nil;
+	s32 i, j;
+	s32 idx;
+
+	assert(show);
+
+	bg = *(struct pixel_t *)&show->templates[show->settings.template].bg;
+	fg = *(struct pixel_t *)&show->templates[show->settings.template].fg;
+	memset(&nil, 0, sizeof nil);
+
+	for (j = 0; j < show->settings.img_h; j++) {
+		for (i = 0; i < show->settings.img_w; i++) {
+			idx = i + j * show->settings.img_w;
+			show->fbuffer_bg[idx] = bg;
+			show->fbuffer_fg[idx] = fg;
+			show->fbuffer[idx] = nil;
 		}
 	}
 
 	return 0;
 }
 
-/* parse_color : parses a color string into a color structure */
-struct color_t parse_color(char *s)
+/* func_templateadd : user function ; adds / overwrites a template */
+int func_templateadd(struct show_t *show, int argc, char **argv)
 {
-	struct color_t color;
-	u32 r, g, b;
+	char *name;
+	char *justification;
+	color_t bg, fg;
 
-	memset(&color, 0, sizeof color);
+	assert(show);
 
-	sscanf(s, "0x%2x%2x%2x", &r, &g, &b);
+	C_RESIZE(&show->templates, &show->templates, sizeof(*show->templates));
 
-	color.r = r;
-	color.g = g;
-	color.b = b;
-
-	return color;
-}
-
-/* f_load : sets up an entry in the font table with these params */
-s32 f_load(struct show_t *show, char *path, char *name)
-{
-	c_resize(&show->fonts, &show->fonts_len, &show->fonts_cap, sizeof(*show->fonts));
-
-	show->fonts[show->fonts_len].ttfbuffer = sys_readfile(path);
-
-	if (!show->fonts[show->fonts_len].ttfbuffer) {
+	if (argc < 5) {
+		ERR("[%s] : not enough arguments, 5 required, found %d\n", argv[0], argc);
 		return -1;
 	}
 
-	show->fonts[show->fonts_len].name = strdup(name);
-	show->fonts[show->fonts_len].path = strdup(path);
+	name = argv[1];
+	bg = util_parsecolor(argv[2]);
+	fg = util_parsecolor(argv[3]);
+	justification = argv[4];
+
+	show->templates[show->templates_len].name = strdup(name);
+	show->templates[show->templates_len].bg = bg;
+	show->templates[show->templates_len].fg = fg;
+
+	// TODO make nicer
+	if (streq(justification, "left")) {
+		show->templates[show->templates_len].justification = SLIDEJUST_LEFT;
+	} else if (streq(justification, "center")) {
+		show->templates[show->templates_len].justification = SLIDEJUST_CENTER;
+	} else if (streq(justification, "right")) {
+		show->templates[show->templates_len].justification = SLIDEJUST_RIGHT;
+	} else { // default to left
+		show->templates[show->templates_len].justification = SLIDEJUST_LEFT;
+	}
+
+	show->templates_len++;
+
+	return 0;
+}
+
+/* func_templateset : user function ; sets the current template */
+int func_templateset(struct show_t *show, int argc, char **argv)
+{
+	s32 i;
+
+	assert(show);
+
+	for (i = 0; i < show->templates_len; i++) {
+		if (streq(show->templates[i].name, argv[1])) {
+			show->settings.template = i;
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
+/* func_printdate : user function ; prints the date at the current line */
+int func_printdate(struct show_t *show, int argc, char **argv)
+{
+	return 0;
+}
+
+/* func_printline : user function ; basically, echo */
+int func_printline(struct show_t *show, int argc, char **argv)
+{
+	s32 i, j;
+	struct font_t *font;
+	struct fchar_t *fchar;
+	char buf[BUFLARGE];
+
+	// NOTE (brian): string join on spaces, then print from 0 to len
+
+	assert(show);
+	assert(show->settings.fontidx >= 0);
+
+	memset(buf, 0, sizeof buf);
+
+	font = show->fonts + show->settings.fontidx;
+
+	for (i = 1; i < argc; i++) {
+		snprintf(buf + strlen(buf), sizeof buf - strlen(buf), "%s", argv[i]);
+		if (i != argc - 1)
+			snprintf(buf + strlen(buf), sizeof buf - strlen(buf), "%s", " ");
+	}
+
+	for (i = 0; i < strlen(buf); i++) {
+		fchar = font_getcodepoint(font, buf[i], show->settings.fontsize);
+
+		draw_rect(show->fbuffer_fg,
+				  fchar->bitmap, // src buf
+				  show->settings.img_w,
+				  show->settings.img_h,
+				  fchar->f_x, // src w
+				  fchar->f_y, // src h
+				  show->settings.pos_x + fchar->b_x,
+				  show->settings.pos_y + fchar->b_y
+				  );
+	}
+
+	return 0;
+}
+
+/* func_dimensions : user function ; sets the output width / height */
+int func_dimensions(struct show_t *show, int argc, char **argv)
+{
+	assert(show);
+
+	if (argc < 2) {
+		return -1;
+	}
+
+	show->settings.img_w = atoi(argv[1]);
+	show->settings.img_h = atoi(argv[2]);
+
+	return 0;
+}
+
+/* func_fontadd : user function ; loads a font, to be run once */
+int func_fontadd(struct show_t *show, int argc, char **argv)
+{
+	char *name;
+	char *path;
+	int rc;
+
+	assert(show);
+
+	switch (argc) {
+		case 0:
+		case 1:
+		{
+			return -1;
+		}
+
+		case 3:
+		{
+			name = argv[1];
+			path = argv[2];
+			break;
+		}
+
+		case 2:
+		{
+			name = argv[1];
+			path = argv[1];
+			break;
+		}
+	}
+
+	C_RESIZE(&show->fonts, &show->fonts, sizeof(*show->fonts));
+
+	rc = font_load(show->fonts + show->fonts_len, name, path);
+	if (rc < 0) {
+		return -1;
+	}
 
 	show->fonts_len++;
 
 	return 0;
 }
 
-/* f_getcodepoint : retrieves the fchar_t from input font and codepoint */
-struct fchar_t *f_getcodepoint(struct show_t *show, char *name, u32 codepoint, u32 fontsize)
+/* func_fontset : user function ; sets the font */
+int func_fontset(struct show_t *show, int argc, char **argv)
 {
-	struct font_t *font;
-	size_t i;
+	s32 i;
 
-	font = f_getfont(show, name);
-	if (!font) {
-		return NULL;
+	assert(show);
+
+	if (argc < 2) {
+		return -1;
 	}
 
-	// TODO (brian) make searching the font in the table, not terribly slow
-	// for large amounts
+	for (i = 0; i < show->fonts_len; i++) {
+		if (streq(show->fonts[i].name, argv[1])) {
+			show->settings.fontidx = i;
+			return 0;
+		}
+	}
+
+	ERR("Couldn't find font '%s'\n", argv[1]);
+
+	return -1;
+}
+
+/* func_fontsizeset : user function ; sets the font size */
+int func_fontsizeset(struct show_t *show, int argc, char **argv)
+{
+	assert(show);
+
+	if (argc < 2) {
+		return -1;
+	}
+
+	show->settings.fontsize = atoi(argv[1]);
+
+	return 0;
+}
+
+/* func_imageadd : user function ; loads an image, to be run once */
+int func_imageadd(struct show_t *show, int argc, char **argv)
+{
+	return 0;
+}
+
+/* func_imagedraw : user function ; draws the image in an argument dependent way */
+int func_imagedraw(struct show_t *show, int argc, char **argv)
+{
+	return 0;
+}
+
+/* func_nop : user(ish) function ; does nothing */
+int func_nop(struct show_t *show, int argc, char **argv)
+{
+	return 0;
+}
+
+//
+// Utility Functions
+//
+
+/* util_framebuffer : (re)sets the show's internal framebuffer */
+int util_framebuffer(struct show_t *show)
+{
+	s32 pixels;
+
+	assert(show);
+
+	free(show->fbuffer);
+	free(show->fbuffer_fg);
+	free(show->fbuffer_bg);
+
+	pixels = show->settings.img_w * show->settings.img_h;
+
+	show->fbuffer    = calloc(pixels, sizeof(struct pixel_t));
+	show->fbuffer_bg = calloc(pixels, sizeof(struct pixel_t));
+	show->fbuffer_fg = calloc(pixels, sizeof(struct pixel_t));
+
+	return 0;
+}
+
+/* util_setdefaults : sets default settings */
+int util_setdefaults(struct show_t *show)
+{
+	assert(show);
+
+	memset(&show->defaults, 0, sizeof show->defaults);
+
+	return 0;
+}
+
+/* util_slidecount : counts the number of slides in the slideshow */
+int util_slidecount(struct show_t *show)
+{
+	s32 i, rc;
+
+	assert(show);
+
+	for (i = 0, rc = 0; i < show->commands_len; i++) {
+		if (streq(show->commands[i].argv[0], "newslide")) {
+			rc++;
+		}
+	}
+
+	return rc;
+}
+
+/* util_getfuncidx : gets the function index */
+int util_getfuncidx(struct show_t *show, char *function)
+{
+	s32 i;
+
+	assert(show);
+	assert(function);
+
+	for (i = 0; i < show->functions_len; i++) {
+		if (streq(show->functions[i].name, function)) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/* util_parsecolor : parses a color string into a color structure */
+struct color_t util_parsecolor(char *s)
+{
+	struct color_t color;
+	u32 r, g, b, a;
+	s32 rc;
+
+	memset(&color, 0, sizeof color);
+
+	rc = sscanf(s, "0x%2x%2x%2x%2x", &r, &g, &b, &a);
+
+	if (rc != 3 && rc != 4) {
+		ERR("Color Parse Error! '%s'\n", s);
+		return color;
+	}
+
+	if (rc == 3) {
+		color.r = r;
+		color.g = g;
+		color.b = b;
+		color.a = 0xff;
+	}
+
+	if (rc == 4) {
+		color.a = a;
+	}
+
+	return color;
+}
+
+//
+// Framebuffer Functions
+//
+
+/* draw_rect : blits a rectangle */
+int draw_rect(struct pixel_t *dst, struct pixel_t *src, s32 dst_w, s32 dst_h,
+		s32 src_w, s32 src_h, s32 pos_x, s32 pos_y)
+{
+	s32 src_x, src_y;
+	s32 dst_x, dst_y;
+	s32 src_idx, dst_idx;
+	struct pixel_t dst_pix, src_pix;
+
+	// NOTE (brian): draws a rectangle on top of another. iterates over the source pixels, picks the
+	// place in the output, performs linear blending, and puts into the output framebuffer.
+
+	for (src_x = 0; src_x < src_w; src_x++) {
+		for (src_y = 0; src_y < src_h; src_y++) {
+
+			dst_x = pos_x + src_x;
+			dst_y = pos_y + src_y;
+
+			// check for errors first, then determine indexes
+			if (dst_x < 0 || dst_x > dst_w) {
+				continue;
+			}
+
+			if (dst_y < 0 || dst_y > dst_h) {
+				continue;
+			}
+
+			src_idx = src_x + src_y * src_w;
+			src_pix = src[src_idx];
+
+			dst_idx = dst_x + dst_y * dst_w;
+			dst_pix = dst[dst_idx];
+
+			dst_pix.r = m_lblend_u8(dst_pix.r, src_pix.r, src_pix.a);
+			dst_pix.g = m_lblend_u8(dst_pix.g, src_pix.g, src_pix.a);
+			dst_pix.b = m_lblend_u8(dst_pix.b, src_pix.b, src_pix.a);
+			dst_pix.a = 0xff;
+
+			dst[dst_idx] = dst_pix;
+		}
+	}
+
+	return 0;
+}
+
+
+//
+// Font Functions
+//
+
+/* font_load : sets up an entry in the font table with these params */
+s32 font_load(struct font_t *font, char *name, char *path)
+{
+	assert(font);
+
+	font->name = strdup(name);
+	font->path = strdup(path);
+	font->ttfbuffer = sys_readfile(path);
+
+	return 0;
+}
+
+/* font_getcodepoint : retrieves the fchar_t from input font and codepoint */
+struct fchar_t *font_getcodepoint(struct font_t *font, u32 codepoint, u32 fontsize)
+{
+	s32 i;
+
+	// NOTE (brian): search for the codepoint in the fonttable. if it's there and rendered for the
+	// given size, return it. Otherwise, render the character for the required fontsize, insert it
+	// into the table, then return it.
 
 	for (i = 0; i < font->ftab_len; i++) {
 		if (font->ftab[i].codepoint == codepoint && font->ftab[i].fontsize == fontsize) {
@@ -720,19 +1057,19 @@ struct fchar_t *f_getcodepoint(struct show_t *show, char *name, u32 codepoint, u
 	// NOTE (brian) if we get here, we didn't find the codepoint, so we
 	// have to render a new one
 
-	c_resize(&font->ftab, &font->ftab_len, &font->ftab_cap, sizeof(*font->ftab));
+	C_RESIZE(&font->ftab, &font->ftab, sizeof(*font->ftab));
 
 	stbtt_fontinfo fontinfo;
 
 	f32 scale_x, scale_y;
 	s32 w, h, xoff, yoff, advance, lsb;
-	u8 *bitmap;
+	u8 *alpha_bitmap;
 
 	stbtt_InitFont(&fontinfo, (unsigned char *)font->ttfbuffer, stbtt_GetFontOffsetForIndex((unsigned char *)font->ttfbuffer, 0));
 	scale_y = stbtt_ScaleForPixelHeight(&fontinfo, fontsize);
 	scale_x = scale_y;
 
-	bitmap = stbtt_GetCodepointBitmap(&fontinfo, scale_x, scale_y, codepoint, &w, &h, &xoff, &yoff);
+	alpha_bitmap = stbtt_GetCodepointBitmap(&fontinfo, scale_x, scale_y, codepoint, &w, &h, &xoff, &yoff);
 
 	stbtt_GetCodepointHMetrics(&fontinfo, (int)codepoint, &advance, &lsb);
 
@@ -747,6 +1084,11 @@ struct fchar_t *f_getcodepoint(struct show_t *show, char *name, u32 codepoint, u
 		font->metricsread = true;
 	}
 
+	struct pixels_t *rgba_bitmap;
+
+	for (i = 0; i < w * h; i++) {
+	}
+
 	font->ftab[font->ftab_len].bitmap  = bitmap;
 	font->ftab[font->ftab_len].f_x     = w;
 	font->ftab[font->ftab_len].f_y     = h;
@@ -759,31 +1101,14 @@ struct fchar_t *f_getcodepoint(struct show_t *show, char *name, u32 codepoint, u
 	return font->ftab + i;
 }
 
-/* f_getfont : returns a pointer to the font structure with the matching name */
-struct font_t *f_getfont(struct show_t *show, char *name)
-{
-	struct font_t *font;
-	size_t i;
-
-	// NOTE (brian) don't use this without the font table being initialized
-
-	for (i = 0, font = NULL; i < show->fonts_len; i++) {
-		if (streq(show->fonts[i].name, name)) {
-			font = show->fonts + i;
-		}
-	}
-
-	return font;
-}
-
-/* f_vertadvance : returns the font's vertical advance */
-s32 f_vertadvance(struct font_t *font)
+/* font_vertadvance : returns the font's vertical advance */
+s32 font_vertadvance(struct font_t *font)
 {
 	return font->ascent - font->descent + font->linegap;
 }
 
-/* f_fontfree : frees all resources associated with the font */
-int f_fontfree(struct font_t *font)
+/* font_fontfree : frees all resources associated with the font */
+int font_fontfree(struct font_t *font)
 {
 	size_t i;
 
@@ -796,31 +1121,5 @@ int f_fontfree(struct font_t *font)
 	}
 
 	return 0;
-}
-
-/* s_getfontname : returns the font name, using the show's as a default */
-char *s_getfontname(struct show_t *show, struct slide_t *slide)
-{
-	if (slide && slide->fontname) {
-		return slide->fontname;
-	}
-
-	return show->fontname;
-}
-
-/* s_getfontsize : returns the font name, using the show's as a default */
-s32 s_getfontsize(struct show_t *show, struct slide_t *slide)
-{
-	if (slide && slide->fontsize) {
-		return slide->fontsize;
-	}
-
-	return show->fontsize;
-}
-
-/* m_lblend_u8 : linear blend on u8s */
-u8 m_lblend_u8(u8 a, u8 b, f32 t)
-{
-	return (u8)((a + t * (b - a)) + 0.5f);
 }
 
