@@ -3,23 +3,16 @@
  * Sat Feb 01, 2020 20:26
  *
  * TODO
- * 0. Include the "regular" common single header lib
- * 1. Convert all of the slideshow directives into single C functions, in a DLL
  * 2. Open an SDL-ish Window and render the slideshow in real time
- * 3. Convert rendering into a programmable function situation
- * 4. Create a DLL loader, and read exported functions as viable candidate. Use the real name of the
- *    function as the name in the slideshow file to use
+ * 4. Create a DLL loader, and read exported functions as viable candidate. Use the real name of the function as the name in the slideshow file to use
  * 5. String parser, quoted strings come through as a single string, etc.
+ * - Implement a way for a command to ask for a framebuffer, and have it get mixed it automagically.
  *
  * DOCUMENTATION
  *
  *   This is my slideshow program. Basically, PowerPoint is bad, and just making a PDF from some
  * markup system didn't create the kinds of interactive / animative presentations that really seem
  * to capture audiences. So, here we are.
- *
- *   This is modeled after Jon Blow's slideshow program, where he basically took his 3d game engine,
- * and just made it render text, images, and whatever from a description file. Mine's a little
- * different:
  *
  * - command driven
  * - defers asset loading, keeping everything loaded until close
@@ -250,7 +243,7 @@ int func_imageadd(struct show_t *show, int argc, char **argv);
 int func_imagedraw(struct show_t *show, int argc, char **argv);
 
 /* draw_rect : blits a rectangle */
-int draw_rect(struct pixel_t *dst, struct pixel_t *src, struct rect_t dstdim, struct rect_t srcdim, struct rect_t dstrect, struct rect_t srcrect);
+int draw_rect(struct pixel_t *dst, struct pixel_t *src, struct rect_t dstdim, struct rect_t srcdim, struct rect_t dstrect, struct rect_t srcrect, int blend);
 
 // Utility Functions
 /* util_framebuffer : (re)sets the show's internal framebuffer */
@@ -487,30 +480,17 @@ int show_render(struct show_t *show, s32 idx)
 	dstrect = dstdim;
 	srcrect = srcdim;
 
-	// mix all of the framebuffers, one at a time, onto the FINAL framebuffer
+	// draw_rect(show->framebuffers[FRAMEBUFFER_FINAL], show->framebuffers[FRAMEBUFFER_BACKGROUND], dstdim, srcdim, dstrect, srcrect, 0);
+	// draw_rect(show->framebuffers[FRAMEBUFFER_FINAL], show->framebuffers[FRAMEBUFFER_BACKGROUND], dstdim, srcdim, dstrect, srcrect);
+
+	/*
 	for (i = 1; i < ARRSIZE(show->framebuffers); i++) {
-		draw_rect(show->framebuffers[0], show->framebuffers[i], dstdim, srcdim, dstrect, srcrect);
+		draw_rect(show->framebuffers[FRAMEBUFFER_FINAL], show->framebuffers[i], dstdim, srcdim, dstrect, srcrect);
 	}
+	*/
 
 	return 0;
 }
-
-#if 0 // legacy
-	// then we draw text over it, no text under slides
-	for (i = 0; i < slide->strings_len; i++) {
-		w_xpos = show->settings.img_w / 12;
-		for (j = 0; slide->strings[i].text && j < strlen(slide->strings[i].text); j++) {
-			if (slide->strings[i].text[j] != ' ') {
-				fchar = f_getcodepoint(show, fontname, slide->strings[i].text[j], fontsize);
-				show_renderchar(show, fchar, show->fg, w_xpos, w_ypos);
-			}
-			w_xpos += fchar->advance;
-		}
-		s32 t;
-		t = f_vertadvance(f_getfont(show, fontname));
-		w_ypos += t;
-	}
-#endif
 
 #if 0
 
@@ -725,7 +705,7 @@ int func_templateset(struct show_t *show, int argc, char **argv)
 	}
 
 	for (i = 0; i < show->settings.img_w * show->settings.img_h; i++) {
-		show->framebuffers[FRAMEBUFFER_BACKGROUND][i] = *(struct pixel_t *)&bg;
+		show->framebuffers[FRAMEBUFFER_FINAL][i] = *(struct pixel_t *)&bg;
 	}
 
 	return 0;
@@ -775,7 +755,7 @@ int func_printline(struct show_t *show, int argc, char **argv)
 			dstrect = util_rect(show->settings.pos_x + fchar->b_x, show->settings.pos_y + fchar->b_y,
 					fchar->f_x, fchar->f_y);
 
-			draw_rect(show->framebuffers[FRAMEBUFFER_TEXT], fchar->bitmap, dstdim, srcdim, dstrect, srcrect);
+			draw_rect(show->framebuffers[FRAMEBUFFER_FINAL], fchar->bitmap, dstdim, srcdim, dstrect, srcrect, 1);
 
 			show->settings.pos_x += fchar->advance;
 		} else {
@@ -1015,13 +995,14 @@ struct rect_t util_rect(s32 x, s32 y, s32 w, s32 h)
 //
 
 /* draw_rect : blits a rectangle */
-int draw_rect(struct pixel_t *dst, struct pixel_t *src, struct rect_t dstdim, struct rect_t srcdim, struct rect_t dstrect, struct rect_t srcrect)
+int draw_rect(struct pixel_t *dst, struct pixel_t *src, struct rect_t dstdim, struct rect_t srcdim, struct rect_t dstrect, struct rect_t srcrect, int blend)
 {
 	s32 x, y;
 	s32 src_x, src_y;
 	s32 dst_x, dst_y;
 	s32 src_idx, dst_idx;
 	struct pixel_t dst_pix, src_pix;
+	f32 alpha;
 
 	// NOTE (brian): this function assumes that you've already done the work to scale the src to the
 	// destination's dimensions.
@@ -1062,10 +1043,18 @@ int draw_rect(struct pixel_t *dst, struct pixel_t *src, struct rect_t dstdim, st
 			dst_idx = dst_x + dst_y * dstdim.w;
 			dst_pix = dst[dst_idx];
 
-			dst_pix.r = m_lblend_u8(dst_pix.r, src_pix.r, src_pix.a);
-			dst_pix.g = m_lblend_u8(dst_pix.g, src_pix.g, src_pix.a);
-			dst_pix.b = m_lblend_u8(dst_pix.b, src_pix.b, src_pix.a);
-			dst_pix.a = 0xff;
+			if (blend) {
+				alpha = src_pix.a * 1.0f / 255.0f;
+				dst_pix.r = m_lblend_u8(dst_pix.r, src_pix.r, alpha);
+				dst_pix.g = m_lblend_u8(dst_pix.g, src_pix.g, alpha);
+				dst_pix.b = m_lblend_u8(dst_pix.b, src_pix.b, alpha);
+				dst_pix.a = 0xff;
+			} else {
+				dst_pix.r = src_pix.r;
+				dst_pix.g = src_pix.g;
+				dst_pix.b = src_pix.b;
+				dst_pix.a = src_pix.a;
+			}
 
 			dst[dst_idx] = dst_pix;
 		}
